@@ -93,6 +93,7 @@ def run_claude(prompt_content, model_config_path, timeout_sec, raw_file):
     cmd = [
         "claude", "-p",
         "--bare",
+        "--allow-dangerously-skip-permissions",
         "--settings", str(settings_path),
         "--output-format", "stream-json",
         "--verbose",
