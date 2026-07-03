@@ -1,6 +1,9 @@
 # Generated results
 results/
 
+# Config file (contains API keys and secrets)
+config.json
+
 # API keys and model configs (contains secrets)
 configs/*.json
 

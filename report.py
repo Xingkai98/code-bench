@@ -176,7 +176,7 @@ def generate_report(summary_file, output_file):
 
     # inject _run_dir for each entry so prompt_detail can find individual runs
     for e in entries:
-        model = e.get("model_config", "").replace("configs/", "").replace(".json", "")
+        model = e.get("model_config", e.get("model_name", "?"))
         prompt = e.get("prompt", "")
         e["_run_dir"] = str(Path(results_dir) / f"{model}__{prompt}")
 

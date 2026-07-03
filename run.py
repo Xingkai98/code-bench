@@ -15,6 +15,18 @@ from pathlib import Path
 BENCH_DIR = Path(__file__).resolve().parent
 
 
+def write_temp_settings(model_cfg, results_dir):
+    """Write a temporary settings file for --settings from inline model config.
+
+    Strips the 'name' field (benchmark-internal) and writes the rest as JSON.
+    Returns the path to the temp file.
+    """
+    settings = {k: v for k, v in model_cfg.items() if k != "name"}
+    path = results_dir / f".settings_{model_cfg['name']}.json"
+    path.write_text(json.dumps(settings))
+    return path
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
@@ -189,10 +201,8 @@ def aggregate(metrics_files):
 # claude invocation
 # ---------------------------------------------------------------------------
 
-def run_claude(prompt_content, model_config_path, cwd, timeout_sec, raw_file):
+def run_claude(prompt_content, settings_path, cwd, timeout_sec, raw_file):
     """Run Claude Code inside *cwd*. Returns (exit_code, wall_duration_ms)."""
-    settings_path = BENCH_DIR / model_config_path
-
     cmd = [
         "claude", "-p",
         "--bare",
@@ -261,8 +271,9 @@ def main():
 
     summary_entries = []
 
-    for model_file in models:
-        model_name = Path(model_file).stem
+    for model_cfg in models:
+        model_name = model_cfg["name"]
+        settings_path = write_temp_settings(model_cfg, results_dir)
 
         for prompt_ref in prompt_refs:
             prompt_name, prompt_content, eval_script = resolve_prompt(prompt_ref)
@@ -298,7 +309,7 @@ def main():
 
                     raw_file = run_dir / f"run-{run_i}.ndjson"
                     exit_code, wall_dur = run_claude(
-                        prompt_content, model_file, workdir, timeout_sec, raw_file
+                        prompt_content, settings_path, workdir, timeout_sec, raw_file
                     )
 
                     result, tool_count, thinking_peak = parse_ndjson(raw_file)
@@ -338,7 +349,7 @@ def main():
 
                     metrics_record = {
                         "run": run_i,
-                        "model_config": model_file,
+                        "model_config": model_name,
                         "model_name": result_model_name or model_name,
                         "prompt": prompt_name,
                         "status": status,
