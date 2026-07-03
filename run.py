@@ -399,13 +399,14 @@ def main():
         log("Uploading to Feishu...")
         try:
             content = report_file.read_text()
-            subprocess.run(
-                [lark_cli, "docs", "+create",
-                 "--title", report_title,
-                 "--content", "-",
-                 "--doc-format", "markdown"],
-                input=content, text=True, check=True,
-            )
+            folder_token = cfg.get("feishu_folder_token", "")
+            cmd = [lark_cli, "docs", "+create",
+                   "--title", report_title,
+                   "--content", "-",
+                   "--doc-format", "markdown"]
+            if folder_token:
+                cmd += ["--parent-token", folder_token]
+            subprocess.run(cmd, input=content, text=True, check=True)
         except Exception as e:
             log(f"Feishu upload failed: {e}. Local report: {report_file}")
     else:
