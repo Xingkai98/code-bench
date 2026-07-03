@@ -4,6 +4,9 @@ results/
 # API keys and model configs (contains secrets)
 configs/*.json
 
+# Experimental prompts (not tracked)
+prompts/experiment/
+
 # Python cache
 __pycache__/
 *.pyc
