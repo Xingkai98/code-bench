@@ -25,6 +25,12 @@ def fmt_num(v):
     return f"{v:.0f}"
 
 
+def fmt_score(v):
+    if v is None:
+        return "-"
+    return f"{v:.2f}"
+
+
 def pick_models(entries):
     """Deduplicate model names in order of first appearance."""
     seen = []
@@ -46,8 +52,8 @@ def pick_prompts(entries):
 
 def summary_table(entries):
     lines = []
-    header = "| Model | Prompt | Runs | Duration (avg) | TTFT (avg) | Cost (avg) | Tokens In | Tokens Out | Tool Calls | Thinking Peak |"
-    sep = "|-------|--------|------|----------------|------------|------------|-----------|------------|------------|---------------|"
+    header = "| Model | Prompt | Runs | Duration (avg) | TTFT (avg) | Cost (avg) | Score | Tokens In | Tokens Out | Tool Calls | Thinking Peak |"
+    sep = "|-------|--------|------|----------------|------------|------------|-------|-----------|------------|------------|---------------|"
     lines.append(header)
     lines.append(sep)
 
@@ -63,6 +69,7 @@ def summary_table(entries):
             f"{fmt_ms(m.get('duration_ms', {}).get('avg'))} | "
             f"{fmt_ms(m.get('ttft_ms', {}).get('avg'))} | "
             f"{fmt_usd(m.get('total_cost_usd', {}).get('avg'))} | "
+            f"{fmt_score(m.get('score', {}).get('avg'))} | "
             f"{fmt_num(m.get('input_tokens', {}).get('avg'))} | "
             f"{fmt_num(m.get('output_tokens', {}).get('avg'))} | "
             f"{fmt_num(m.get('tool_call_count', {}).get('avg'))} | "
@@ -85,11 +92,23 @@ def prompt_detail(prompt_name, entries):
         ("ttft_ms", "TTFT (ms)"),
         ("num_turns", "Turns"),
         ("total_cost_usd", "Cost (USD)"),
+        ("score", "Score"),
         ("input_tokens", "Input Tokens"),
         ("output_tokens", "Output Tokens"),
         ("tool_call_count", "Tool Calls"),
         ("thinking_token_peak", "Thinking Peak"),
     ]
+
+    def _fmt_val(key, val):
+        if val is None:
+            return "-"
+        if key == "total_cost_usd":
+            return fmt_usd(val)
+        if key == "score":
+            return fmt_score(val)
+        if key in ("input_tokens", "output_tokens", "num_turns", "tool_call_count", "thinking_token_peak"):
+            return fmt_num(val)
+        return fmt_ms(val)
 
     # cross-model comparison table
     lines.append("### Comparison")
@@ -103,15 +122,7 @@ def prompt_detail(prompt_name, entries):
         for e in entries:
             m = e.get("metrics", {}).get(key, {})
             avg = m.get("avg")
-            if isinstance(avg, (int, float)):
-                if key in ("total_cost_usd",):
-                    vals.append(fmt_usd(avg))
-                elif key in ("input_tokens", "output_tokens", "num_turns", "tool_call_count", "thinking_token_peak"):
-                    vals.append(fmt_num(avg))
-                else:
-                    vals.append(fmt_ms(avg))
-            else:
-                vals.append("-")
+            vals.append(_fmt_val(key, avg) if isinstance(avg, (int, float)) else "-")
         lines.append(f"| {label} | " + " | ".join(vals) + " |")
 
     lines.append("")
@@ -125,8 +136,8 @@ def prompt_detail(prompt_name, entries):
         # load individual run metrics
         run_files = sorted(Path(e.get("_run_dir", ".")).glob("run-*.metrics.json"))
         if run_files:
-            lines.append("| Run | Status | Wall (ms) | Duration (ms) | TTFT (ms) | Turns | Cost | Tokens In | Tokens Out | Tools |")
-            lines.append("|-----|--------|-----------|---------------|-----------|-------|------|-----------|------------|-------|")
+            lines.append("| Run | Status | Wall (ms) | Duration (ms) | TTFT (ms) | Turns | Cost | Score | Tokens In | Tokens Out | Tools |")
+            lines.append("|-----|--------|-----------|---------------|-----------|-------|------|-------|-----------|------------|-------|")
             for rf in run_files:
                 with open(rf) as fh:
                     rd = json.load(fh)
@@ -138,10 +149,19 @@ def prompt_detail(prompt_name, entries):
                     f"{fmt_num(rm.get('ttft_ms'))} | "
                     f"{fmt_num(rm.get('num_turns'))} | "
                     f"{fmt_usd(rm.get('total_cost_usd'))} | "
+                    f"{fmt_score(rm.get('score'))} | "
                     f"{fmt_num(rm.get('input_tokens'))} | "
                     f"{fmt_num(rm.get('output_tokens'))} | "
                     f"{fmt_num(rm.get('tool_call_count'))} |"
                 )
+                # show eval summary if present
+                es = rm.get("eval_summary")
+                if es:
+                    lines.append(f"| | | | | | | | Eval: {es} | | | |")
+                ed = rm.get("eval_details")
+                if ed and isinstance(ed, dict):
+                    detail_parts = ", ".join(f"{k}={v}" for k, v in ed.items())
+                    lines.append(f"| | | | | | | | Details: {detail_parts} | | | |")
             lines.append("")
 
     return "\n".join(lines)

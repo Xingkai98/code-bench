@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,13 +19,44 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
 def load_config():
     with open(BENCH_DIR / "config.json") as f:
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# prompt resolution
+# ---------------------------------------------------------------------------
+
+def resolve_prompt(prompt_ref):
+    """Resolve a prompt reference to (name, content, eval_script_or_None).
+
+    Supports two formats:
+      - Old: "prompts/foo.txt"  → reads the file directly, no eval
+      - New: "prompts/foo"      → reads foo/prompt.txt, finds foo/eval.py
+    """
+    ref = BENCH_DIR / prompt_ref
+    if ref.is_file() and ref.suffix == ".txt":
+        return ref.stem, ref.read_text(), None
+    if ref.is_dir():
+        prompt_file = ref / "prompt.txt"
+        if not prompt_file.exists():
+            raise FileNotFoundError(f"{prompt_file} not found")
+        eval_file = ref / "eval.py"
+        return ref.name, prompt_file.read_text(), eval_file if eval_file.exists() else None
+    raise FileNotFoundError(f"Cannot resolve prompt: {prompt_ref}")
+
+
+# ---------------------------------------------------------------------------
+# NDJSON parsing
+# ---------------------------------------------------------------------------
+
 def parse_ndjson(raw_file):
-    """Parse Claude stream-json NDJSON. Returns result event, tool count, thinking peak."""
+    """Parse Claude stream-json NDJSON. Returns (result_event, tool_count, thinking_peak)."""
     result = {}
     tool_count = 0
     thinking_peak = 0
@@ -39,7 +69,6 @@ def parse_ndjson(raw_file):
             line = line.strip()
             if not line:
                 continue
-            # strip optional ts(1) prefix: "1750000000.123 {...}"
             line = re.sub(r"^\d+\.\d+\s", "", line)
             try:
                 evt = json.loads(line)
@@ -63,8 +92,41 @@ def parse_ndjson(raw_file):
     return result, tool_count, thinking_peak
 
 
+# ---------------------------------------------------------------------------
+# eval
+# ---------------------------------------------------------------------------
+
+def run_eval(eval_script, workdir):
+    """Run eval script, return (score, details, summary, error)."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(eval_script), str(workdir)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "no output")[:300]
+            return None, None, None, f"eval exit {proc.returncode}: {err}"
+        data = json.loads(proc.stdout)
+        return data.get("score"), data.get("details"), data.get("summary"), None
+    except json.JSONDecodeError:
+        return None, None, None, f"eval output not valid JSON: {proc.stdout[:200]}"
+    except Exception as e:
+        return None, None, None, str(e)
+
+
+# ---------------------------------------------------------------------------
+# metrics extraction
+# ---------------------------------------------------------------------------
+
+METRIC_KEYS = [
+    "wall_duration_ms", "duration_ms", "duration_api_ms", "ttft_ms",
+    "time_to_request_ms", "num_turns", "total_cost_usd", "input_tokens",
+    "output_tokens", "tool_call_count", "thinking_token_peak",
+]
+EVAL_KEYS = ["score"]
+
+
 def extract_metrics(result, wall_duration_ms, tool_count, thinking_peak):
-    """Extract standardised metrics from a result event dict."""
     usage = result.get("usage", {})
 
     def num(key, default=None):
@@ -86,66 +148,11 @@ def extract_metrics(result, wall_duration_ms, tool_count, thinking_peak):
     }
 
 
-def run_claude(prompt_content, model_config_path, timeout_sec, raw_file):
-    """Run Claude Code and capture stream-json. Returns (exit_code, wall_duration_ms)."""
-    settings_path = BENCH_DIR / model_config_path
-
-    cmd = [
-        "claude", "-p",
-        "--bare",
-        "--allow-dangerously-skip-permissions",
-        "--settings", str(settings_path),
-        "--output-format", "stream-json",
-        "--verbose",
-        prompt_content,
-    ]
-
-    start_ms = int(time.time() * 1000)
-
-    # pipe through ts(1) if available, otherwise raw
-    try:
-        use_ts = shutil.which("ts") is not None
-        if use_ts:
-            with open(raw_file, "w") as out:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                ts_proc = subprocess.Popen(
-                    ["ts", "%.s"], stdin=proc.stdout, stdout=out, stderr=subprocess.DEVNULL
-                )
-                proc.stdout.close()
-                try:
-                    proc.wait(timeout=timeout_sec)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    ts_proc.kill()
-                    ts_proc.wait()
-                else:
-                    ts_proc.wait()
-            exit_code = proc.returncode
-        else:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
-            with open(raw_file, "wb") as f:
-                f.write(proc.stdout)
-            exit_code = proc.returncode
-    except subprocess.TimeoutExpired:
-        exit_code = 124  # mimic GNU timeout convention
-
-    end_ms = int(time.time() * 1000)
-    return exit_code, end_ms - start_ms
-
-
 def aggregate(metrics_files):
-    """Aggregate a list of per-run metrics.json paths into one aggregate dict."""
     runs = []
     for mf in metrics_files:
         with open(mf) as f:
             runs.append(json.load(f))
-
-    metric_keys = [
-        "wall_duration_ms", "duration_ms", "duration_api_ms", "ttft_ms",
-        "time_to_request_ms", "num_turns", "total_cost_usd", "input_tokens",
-        "output_tokens", "tool_call_count", "thinking_token_peak",
-    ]
 
     if not runs:
         return {}
@@ -164,7 +171,7 @@ def aggregate(metrics_files):
         }
 
     metrics_agg = {}
-    for k in metric_keys:
+    for k in METRIC_KEYS + EVAL_KEYS:
         metrics_agg[k] = agg([r["metrics"].get(k) for r in runs])
 
     return {
@@ -178,6 +185,59 @@ def aggregate(metrics_files):
     }
 
 
+# ---------------------------------------------------------------------------
+# claude invocation
+# ---------------------------------------------------------------------------
+
+def run_claude(prompt_content, model_config_path, cwd, timeout_sec, raw_file):
+    """Run Claude Code inside *cwd*. Returns (exit_code, wall_duration_ms)."""
+    settings_path = BENCH_DIR / model_config_path
+
+    cmd = [
+        "claude", "-p",
+        "--bare",
+        "--permission-mode", "acceptEdits",
+        "--settings", str(settings_path),
+        "--output-format", "stream-json",
+        "--verbose",
+        prompt_content,
+    ]
+
+    start_ms = int(time.time() * 1000)
+
+    try:
+        use_ts = shutil.which("ts") is not None
+        if use_ts:
+            with open(raw_file, "w") as out:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(cwd))
+                ts_proc = subprocess.Popen(
+                    ["ts", "%.s"], stdin=proc.stdout, stdout=out, stderr=subprocess.DEVNULL
+                )
+                proc.stdout.close()
+                try:
+                    proc.wait(timeout=timeout_sec)
+                except subprocess.TimeoutExpired:
+                    proc.kill(); proc.wait()
+                    ts_proc.kill(); ts_proc.wait()
+                else:
+                    ts_proc.wait()
+            exit_code = proc.returncode
+        else:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec, cwd=str(cwd))
+            with open(raw_file, "wb") as f:
+                f.write(proc.stdout)
+            exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        exit_code = 124
+
+    end_ms = int(time.time() * 1000)
+    return exit_code, end_ms - start_ms
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
 def main():
     cfg = load_config()
     runs_n = cfg["runs"]
@@ -185,20 +245,18 @@ def main():
     retry = cfg["retry_count"]
     template_dir = cfg.get("template_dir")
     models = cfg["models"]
-    prompts = cfg["prompts"]
+    prompt_refs = cfg["prompts"]
 
     if not models:
-        log("ERROR: no models configured in config.json")
-        sys.exit(1)
-    if not prompts:
-        log("ERROR: no prompts configured in config.json")
-        sys.exit(1)
+        log("ERROR: no models configured in config.json"); sys.exit(1)
+    if not prompt_refs:
+        log("ERROR: no prompts configured in config.json"); sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     results_dir = BENCH_DIR / "results" / timestamp
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    log(f"Benchmark starting — {len(models)} models x {len(prompts)} prompts x {runs_n} runs")
+    log(f"Benchmark starting — {len(models)} models x {len(prompt_refs)} prompts x {runs_n} runs")
     log(f"Results: {results_dir}")
 
     summary_entries = []
@@ -206,27 +264,33 @@ def main():
     for model_file in models:
         model_name = Path(model_file).stem
 
-        for prompt_file in prompts:
-            prompt_name = Path(prompt_file).stem
-            prompt_content = (BENCH_DIR / prompt_file).read_text()
+        for prompt_ref in prompt_refs:
+            prompt_name, prompt_content, eval_script = resolve_prompt(prompt_ref)
 
             run_dir = results_dir / f"{model_name}__{prompt_name}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
             log(f">>> {model_name} / {prompt_name}")
+            if eval_script:
+                log(f"    eval: {eval_script.relative_to(BENCH_DIR)}")
 
             run_metrics_files = []
 
             for run_i in range(1, runs_n + 1):
                 attempt = 0
                 success = False
+                error_msg = None
+                wall_dur = 0
+                metrics = {}
 
                 while attempt <= retry and not success:
                     if attempt > 0:
-                        log(f"  Retry {attempt}/{retry} for {model_name}/{prompt_name} run {run_i}")
+                        log(f"  Retry {attempt}/{retry}")
 
-                    # temp workspace per run
-                    workdir = tempfile.mkdtemp()
+                    # workspace lives inside the run results dir (persisted)
+                    workdir = run_dir / f"run-{run_i}" / "workspace"
+                    workdir.mkdir(parents=True, exist_ok=True)
+
                     if template_dir:
                         tmpl = BENCH_DIR / template_dir
                         if tmpl.is_dir():
@@ -234,13 +298,11 @@ def main():
 
                     raw_file = run_dir / f"run-{run_i}.ndjson"
                     exit_code, wall_dur = run_claude(
-                        prompt_content, model_file, timeout_sec, raw_file
+                        prompt_content, model_file, workdir, timeout_sec, raw_file
                     )
 
-                    # parse output
                     result, tool_count, thinking_peak = parse_ndjson(raw_file)
 
-                    # determine status
                     if exit_code == 124:
                         status = "timeout"
                         error_msg = f"timed out after {timeout_sec}s"
@@ -260,6 +322,20 @@ def main():
                     if mu:
                         result_model_name = list(mu.keys())[0]
 
+                    # eval
+                    score = None
+                    eval_details = None
+                    eval_summary = None
+                    eval_error = None
+                    if status == "success" and eval_script:
+                        score, eval_details, eval_summary, eval_error = run_eval(eval_script, workdir)
+                        if eval_error:
+                            log(f"  Eval error: {eval_error}")
+
+                    metrics["score"] = score
+                    metrics["eval_details"] = eval_details
+                    metrics["eval_summary"] = eval_summary
+
                     metrics_record = {
                         "run": run_i,
                         "model_config": model_file,
@@ -276,17 +352,17 @@ def main():
 
                     run_metrics_files.append(metrics_file)
 
-                    # cleanup
-                    shutil.rmtree(workdir, ignore_errors=True)
-
                     if status == "success":
                         success = True
                     else:
+                        # clean up failed workspace; keep successful ones
+                        shutil.rmtree(workdir, ignore_errors=True)
                         attempt += 1
 
                 dur_str = f"{metrics.get('duration_ms', '-')}ms"
+                score_str = f", score={score:.2f}" if score is not None else ""
                 if success:
-                    log(f"  Run {run_i}: OK — {wall_dur}ms wall, {dur_str} claude")
+                    log(f"  Run {run_i}: OK — {wall_dur}ms wall, {dur_str} claude{score_str}")
                 else:
                     log(f"  Run {run_i}: FAILED after {attempt} attempts — {error_msg}")
 
@@ -304,7 +380,7 @@ def main():
         json.dump(summary_entries, f, indent=2)
     log(f"Summary: {summary_file}")
 
-    # generate report
+    # report
     report_file = results_dir / "report.md"
     subprocess.run([sys.executable, str(BENCH_DIR / "report.py"), str(summary_file), str(report_file)])
     log(f"Report: {report_file}")
@@ -313,7 +389,6 @@ def main():
     report_title = f"Bench Report — {timestamp}"
     lark_cli = shutil.which("lark-cli") or shutil.which("lark-cli", path=os.path.expanduser("~/.npm-global/bin"))
     if not lark_cli:
-        # try common npm global locations
         for p in ["~/.npm-global/bin", "~/node_modules/.bin"]:
             candidate = Path(os.path.expanduser(p)) / "lark-cli"
             if candidate.exists():
@@ -329,9 +404,7 @@ def main():
                  "--title", report_title,
                  "--content", "-",
                  "--doc-format", "markdown"],
-                input=content,
-                text=True,
-                check=True,
+                input=content, text=True, check=True,
             )
         except Exception as e:
             log(f"Feishu upload failed: {e}. Local report: {report_file}")
