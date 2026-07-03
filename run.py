@@ -311,15 +311,27 @@ def main():
 
     # feishu upload
     report_title = f"Bench Report — {timestamp}"
-    if shutil.which("lark-cli"):
+    lark_cli = shutil.which("lark-cli") or shutil.which("lark-cli", path=os.path.expanduser("~/.npm-global/bin"))
+    if not lark_cli:
+        # try common npm global locations
+        for p in ["~/.npm-global/bin", "~/node_modules/.bin"]:
+            candidate = Path(os.path.expanduser(p)) / "lark-cli"
+            if candidate.exists():
+                lark_cli = str(candidate)
+                break
+
+    if lark_cli:
         log("Uploading to Feishu...")
         try:
             subprocess.run(
-                ["lark-cli", "doc", "create", "--title", report_title, "--content", report_file.read_text()],
+                [lark_cli, "docs", "+create",
+                 "--title", report_title,
+                 "--content", f"@{report_file}",
+                 "--doc-format", "markdown"],
                 check=True,
             )
-        except Exception:
-            log(f"Feishu upload failed (check lark-cli auth). Local report: {report_file}")
+        except Exception as e:
+            log(f"Feishu upload failed: {e}. Local report: {report_file}")
     else:
         log(f"lark-cli not found, skipping Feishu upload. Report: {report_file}")
 
