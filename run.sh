@@ -64,30 +64,35 @@ for m_idx in $(seq 0 $((MODEL_COUNT - 1))); do
         fi
 
         RAW_FILE="$RUN_DIR/run-${run}.ndjson"
-        TS_FILE="$RUN_DIR/run-${run}_ts.ndjson"
 
-        # record wall-clock start
         START_MS=$(date +%s%3N)
 
-        # run claude with timeout; capture stream-json with timestamps
+        # run claude with timeout; pipe through ts for per-event timestamps
+        # ts (moreutils) prepends ISO timestamps; fallback to raw capture
         set +e
-        timeout "$TIMEOUT" claude -p \
-          --bare \
-          --settings "$BENCH_DIR/$MODEL_FILE" \
-          --output-format stream-json \
-          --verbose \
-          "$PROMPT_CONTENT" \
-          > "$RAW_FILE" 2>/dev/null
-        EXIT_CODE=$?
+        if command -v ts &>/dev/null; then
+          timeout "$TIMEOUT" claude -p \
+            --bare \
+            --settings "$BENCH_DIR/$MODEL_FILE" \
+            --output-format stream-json \
+            --verbose \
+            "$PROMPT_CONTENT" \
+            2>/dev/null | ts "%.s" > "$RAW_FILE"
+          EXIT_CODE=${PIPESTATUS[0]}
+        else
+          timeout "$TIMEOUT" claude -p \
+            --bare \
+            --settings "$BENCH_DIR/$MODEL_FILE" \
+            --output-format stream-json \
+            --verbose \
+            "$PROMPT_CONTENT" \
+            > "$RAW_FILE" 2>/dev/null
+          EXIT_CODE=$?
+        fi
         set -e
 
         END_MS=$(date +%s%3N)
         WALL_DURATION=$((END_MS - START_MS))
-
-        # add timestamps and wall-clock to each line
-        while IFS= read -r line; do
-          echo "{\"ts_ms\":$(date +%s%3N),\"wall_elapsed_ms\":$WALL_DURATION,\"event\":$line}"
-        done < "$RAW_FILE" > "$TS_FILE" || true
 
         # determine status
         if [ "$EXIT_CODE" -eq 124 ]; then
@@ -101,8 +106,8 @@ for m_idx in $(seq 0 $((MODEL_COUNT - 1))); do
           ERROR_MSG=""
         fi
 
-        # --- extract metrics ---
-        RESULT_LINE=$(grep '"type":"result"' "$RAW_FILE" 2>/dev/null | tail -1 || echo '{}')
+        # --- extract metrics (strip optional ts prefix) ---
+        RESULT_LINE=$(grep '"type":"result"' "$RAW_FILE" 2>/dev/null | tail -1 | sed 's/^[0-9.]* //' || echo '{}')
 
         # safely extract from result event
         _get() { echo "$RESULT_LINE" | jq -r "$1 // empty" 2>/dev/null || echo ""; }
@@ -110,9 +115,9 @@ for m_idx in $(seq 0 $((MODEL_COUNT - 1))); do
         # tool call count from assistant events
         TOOL_COUNT=$(grep '"type":"tool_use"' "$RAW_FILE" 2>/dev/null | wc -l || echo 0)
 
-        # thinking token peak from system events
+        # thinking token peak from system events (strip optional ts prefix)
         THINKING_PEAK=$(grep '"subtype":"thinking_tokens"' "$RAW_FILE" 2>/dev/null | \
-          jq -r '.estimated_tokens // 0' 2>/dev/null | sort -n | tail -1 || echo 0)
+          sed 's/^[0-9.]* //' | jq -r '.estimated_tokens // 0' 2>/dev/null | sort -n | tail -1 || echo 0)
 
         # token usage from result
         INPUT_TOKENS=$(_get '.usage.input_tokens')
