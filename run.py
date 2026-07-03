@@ -323,12 +323,16 @@ def main():
     if lark_cli:
         log("Uploading to Feishu...")
         try:
+            content = report_file.read_text()
             subprocess.run(
                 [lark_cli, "docs", "+create",
                  "--title", report_title,
-                 "--content", f"@{report_file}",
+                 "--content", "-",
                  "--doc-format", "markdown"],
+                input=content,
+                text=True,
                 check=True,
+            )
             )
         except Exception as e:
             log(f"Feishu upload failed: {e}. Local report: {report_file}")
