@@ -1,1 +1,1 @@
-{"runs":3,"timeout_seconds":300,"retry_count":0,"models":["configs/deepseek-v4.json"],"prompts":["prompts/pi-digits"],"template_dir":null,"feishu_folder_token":"X12wfQ9SKlxIx6de5ZpcJhZunAe"}
+{"runs":3,"timeout_seconds":600,"retry_count":1,"models":[],"prompts":[],"template_dir":null,"feishu_folder_token":"X12wfQ9SKlxIx6de5ZpcJhZunAe"}
