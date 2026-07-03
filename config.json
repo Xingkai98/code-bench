@@ -1,0 +1,8 @@
+{
+  "runs": 3,
+  "timeout_seconds": 600,
+  "retry_count": 1,
+  "models": [],
+  "prompts": [],
+  "template_dir": null
+}

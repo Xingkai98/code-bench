@@ -1,0 +1,19 @@
+# Generated results
+results/
+
+# API keys and model configs (contains secrets)
+configs/*.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.swp
+*.swo
+*~

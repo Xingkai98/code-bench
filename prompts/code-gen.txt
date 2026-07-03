@@ -1,0 +1,1 @@
+Write a "hello world" HTTP server in Go that listens on port 8080 and returns JSON {"message": "hello world"} on GET /.
