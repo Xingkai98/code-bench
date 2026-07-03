@@ -333,7 +333,6 @@ def main():
                 text=True,
                 check=True,
             )
-            )
         except Exception as e:
             log(f"Feishu upload failed: {e}. Local report: {report_file}")
     else:
