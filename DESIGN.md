@@ -12,8 +12,9 @@ bench/
 ├── configs/                     # Per-model config: env vars, model name, thinking params
 ├── prompts/                     # Test prompts (*.txt)
 ├── templates/                   # Optional: initial workspace files copied per run
-├── run.sh                       # Entry point: scheduler + metric extraction
-├── report.py                    # JSON → Markdown report + Feishu upload
+├── run.sh                       # Thin launcher → calls run.py
+├── run.py                       # Python: scheduler, NDJSON parser, metric extraction, aggregation
+├── report.py                    # Python: JSON → Markdown report + Feishu upload
 └── results/<timestamp>/         # Auto-generated output
 ```
 
@@ -53,9 +54,10 @@ Each run gets a fresh temp directory (`mktemp -d`). Optional `template_dir` can 
 ### Retry logic
 On failure or timeout, auto-retries up to configurable N times (default 1). Failed runs are marked in the report.
 
-### Language split
-- **Bash** (`run.sh`): Scheduling, CLI invocation, NDJSON parsing → metrics JSON
+### Implementation
+- **Python** (`run.py`): Scheduling, CLI invocation, NDJSON parsing → metrics JSON, aggregation
 - **Python** (`report.py`): JSON aggregation → Markdown report generation + Feishu doc upload
+- **Bash** (`run.sh`): Thin 3-line launcher wrapping `run.py`
 
 ## Model Config Schema
 

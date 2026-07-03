@@ -21,7 +21,8 @@ See [DESIGN.md](DESIGN.md) for the full architecture and decision record.
 | `configs/*.json` | Per-model settings (API key, base URL, thinking) |
 | `prompts/*.txt` | Test prompts |
 | `templates/` | Optional: files copied into each run's workspace |
-| `run.sh` | Bash scheduler + metric extraction |
+| `run.sh` | Thin launcher → calls `run.py` |
+| `run.py` | Python: scheduler, NDJSON parser, metric extraction, aggregation |
 | `report.py` | Python: JSON → Markdown report + Feishu upload |
 | `results/<timestamp>/` | All output (raw streams, metrics, report) |
 

@@ -1,8 +1,8 @@
 {
-  "runs": 1,
-  "timeout_seconds": 120,
-  "retry_count": 0,
-  "models": ["configs/deepseek-v4.json"],
-  "prompts": ["prompts/code-gen.txt"],
+  "runs": 3,
+  "timeout_seconds": 600,
+  "retry_count": 1,
+  "models": [],
+  "prompts": [],
   "template_dir": null
 }
