@@ -1,0 +1,90 @@
+这个仓库里有一个多年未维护的 C++ tiny C frontend。它现在无法在现代 Linux 环境中可靠构建，也没有稳定的 CLI、错误处理和模块边界。
+
+你的任务是把它恢复并现代化：修复可见问题，同时重构 lexer/parser 的边界，使它成为一个可构建、可测试、可复用的小型前端。
+
+## CLI 契约
+
+CMake 项目必须能通过以下命令构建，并生成名为 `cparser` 的可执行文件：
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+`cparser` 必须从 stdin 读取完整输入，并支持：
+
+- `cparser --tokens`
+  - 对 stdin 做词法分析，每行输出一个 token。
+  - 输出格式必须是 `TYPE:lexeme:line:column`。
+  - line 和 column 从 1 开始计数；tab 按 1 个 column 计。
+  - 必须支持的 token 类型：`KEYWORD`、`IDENT`、`INT`、`OP`、`LPAREN`、`RPAREN`、`LBRACE`、`RBRACE`、`SEMI`、`COMMA`。
+  - 至少支持关键字：`int`、`void`、`return`、`if`、`else`、`while`、`for`。
+  - 至少支持运算符：`+`、`-`、`*`、`/`、`=`、`==`、`<`、`<=`、`>`、`>=`、`!=`。
+- `cparser --parse`
+  - 将 stdin 当作 tiny C 子集解析。
+  - 成功时只输出 `OK`，并以退出码 0 退出。
+  - 失败时向 stderr 输出以 `ERROR:` 开头的信息，并以非 0 退出码退出。
+- `cparser --eval`
+  - 将 stdin 当作整数算术表达式解析并求值。
+  - 成功时输出整数结果，并以退出码 0 退出。
+  - 失败时向 stderr 输出以 `ERROR:` 开头的信息，并以非 0 退出码退出。
+
+## 词法要求
+
+- 空白字符包括空格、tab、`\r`、`\n`。
+- `//` 行注释和 `/* ... */` 块注释必须被忽略；块注释可能跨多行。
+- 未闭合块注释必须报错，不能卡死。
+- identifier 规则：字母或 `_` 开头，后续可包含字母、数字或 `_`。
+- integer literal 是十进制非负整数。
+
+## 表达式要求
+
+表达式至少支持：
+
+- 整数 literal
+- identifier（parse 模式需要；eval 模式可以拒绝含 identifier 的表达式）
+- 括号
+- 一元 `+` / `-`
+- 二元 `+`、`-`、`*`、`/`
+- 正常优先级和左结合
+- 整数除法；除以 0 必须报错
+
+示例：
+
+- `2+3*4` 的求值结果是 `14`
+- `(2+3)*4` 的求值结果是 `20`
+- `8-3-2` 的求值结果是 `3`
+- `8/4/2` 的求值结果是 `1`
+- `-(2+3)*4` 的求值结果是 `-20`
+
+## parse-only 的 tiny C 子集
+
+`--parse` 除了能解析单个表达式，还必须能解析这些 C-like 结构：
+
+- 变量声明：`int x;`
+- 带初始化的变量声明：`int x = 1 + 2;`
+- return 语句：`return expr;`
+- 表达式语句：`expr;`
+- block：`{ stmt* }`
+- 简单函数定义：`int main() { stmt* }`、`void f() { stmt* }`
+
+这里不要求执行变量或函数，也不要求完整 C 语义；只要求语法解析正确。
+
+## 错误处理要求
+
+- 格式错误、非法字符、括号不匹配、缺少分号、未闭合注释、除以 0 都必须失败。
+- 失败时不能卡死，退出码必须非 0。
+- stderr 必须以 `ERROR:` 开头，并包含出错位置，格式中至少要出现 `line:column`。
+
+## 结构要求
+
+- Lexer 不应直接打印主结果，也不应通过全局 buffer 传结果；应返回结构化 token。
+- Token 至少应包含 type、lexeme/text、line、column。
+- Parser 应消费 token stream，不应依赖 lexer 全局状态，也不应在核心解析逻辑中重新调用 CLI。
+- `main.cpp` 只负责 CLI 输入输出、模式分发和错误码。
+- lexer/parser 应能被 C++ 测试代码复用。
+- 移除核心路径里的固定长度 token/input buffer，以及库层面的 `exit()` / `system()`。
+
+可以添加、删除或重命名源码文件；不要引入额外运行时依赖。
+
+可以用 `python3 test_basic.py` 做可见 smoke check。
