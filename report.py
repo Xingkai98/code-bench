@@ -52,8 +52,10 @@ def pick_prompts(entries):
 
 def summary_table(entries):
     lines = []
-    header = "| Model | Prompt | Runs | Duration (avg) | TTFT (avg) | Cost (avg) | Score | Tokens In | Tokens Out | Tool Calls | Thinking Peak |"
-    sep = "|-------|--------|------|----------------|------------|------------|-------|-----------|------------|------------|---------------|"
+    header = ("| Model | Prompt | Runs | Duration | API Wait | Tool Exec | "
+              "TTFT | Cost | Score | Tokens In | Tokens Out | Tools | Think Peak |")
+    sep = ("|-------|--------|------|----------|----------|-----------|"
+           "------|------|-------|-----------|------------|-------|------------|")
     lines.append(header)
     lines.append(sep)
 
@@ -67,6 +69,8 @@ def summary_table(entries):
         row = (
             f"| {model} | {prompt} | {ok}/{total} | "
             f"{fmt_ms(m.get('duration_ms', {}).get('avg'))} | "
+            f"{fmt_ms(m.get('api_wait_ms', {}).get('avg'))} | "
+            f"{fmt_ms(m.get('tool_exec_ms', {}).get('avg'))} | "
             f"{fmt_ms(m.get('ttft_ms', {}).get('avg'))} | "
             f"{fmt_usd(m.get('total_cost_usd', {}).get('avg'))} | "
             f"{fmt_score(m.get('score', {}).get('avg'))} | "
@@ -88,6 +92,8 @@ def prompt_detail(prompt_name, entries):
     models = pick_models(entries)
     metrics_keys = [
         ("duration_ms", "Duration (ms)"),
+        ("api_wait_ms", "API Wait (ms)"),
+        ("tool_exec_ms", "Tool Exec (ms)"),
         ("duration_api_ms", "API Duration (ms)"),
         ("ttft_ms", "TTFT (ms)"),
         ("num_turns", "Turns"),
@@ -136,8 +142,8 @@ def prompt_detail(prompt_name, entries):
         # load individual run metrics
         run_files = sorted(Path(e.get("_run_dir", ".")).glob("run-*.metrics.json"))
         if run_files:
-            lines.append("| Run | Status | Wall (ms) | Duration (ms) | TTFT (ms) | Turns | Cost | Score | Tokens In | Tokens Out | Tools |")
-            lines.append("|-----|--------|-----------|---------------|-----------|-------|------|-------|-----------|------------|-------|")
+            lines.append("| Run | Status | Wall | Duration | API Wait | Tool Exec | TTFT | Turns | Cost | Score | Tokens In | Tokens Out | Tools |")
+            lines.append("|-----|--------|------|----------|----------|-----------|------|-------|------|-------|-----------|------------|-------|")
             for rf in run_files:
                 with open(rf) as fh:
                     rd = json.load(fh)
@@ -146,6 +152,8 @@ def prompt_detail(prompt_name, entries):
                     f"| {rd['run']} | {rd['status']} | "
                     f"{fmt_num(rm.get('wall_duration_ms'))} | "
                     f"{fmt_num(rm.get('duration_ms'))} | "
+                    f"{fmt_num(rm.get('api_wait_ms'))} | "
+                    f"{fmt_num(rm.get('tool_exec_ms'))} | "
                     f"{fmt_num(rm.get('ttft_ms'))} | "
                     f"{fmt_num(rm.get('num_turns'))} | "
                     f"{fmt_usd(rm.get('total_cost_usd'))} | "

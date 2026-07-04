@@ -1,3 +1,5 @@
+# Base image for all benchmark tasks.
+# Per-task Dockerfiles should: FROM code-bench-sandbox:latest
 FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive

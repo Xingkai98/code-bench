@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -121,6 +122,37 @@ def _ensure_docker_image(image, build_on_start):
     log(f"Docker image '{image}' built successfully.")
 
 
+def _ensure_prompt_image(seed_dir, prompt_name, build_on_start):
+    """Build task-specific Docker image if prompt has a Dockerfile.
+
+    Returns the image tag to use (task-specific or None for base image).
+    """
+    dockerfile = seed_dir / "Dockerfile" if seed_dir else None
+    if not dockerfile or not dockerfile.exists():
+        return None
+
+    image = f"code-bench-{prompt_name}:latest"
+
+    # Rebuild if Dockerfile or seed files are newer than image
+    result = _run_docker(["image", "inspect", image])
+    if result.returncode == 0:
+        return image
+
+    if not build_on_start:
+        raise RuntimeError(
+            f"Docker image '{image}' not found. "
+            f"Build it with: docker build -t {image} {seed_dir}"
+        )
+
+    log(f"Building task image '{image}'...")
+    build = _run_docker(["build", "-t", image, str(seed_dir)])
+    if build.returncode != 0:
+        tail = build.stdout.decode(errors="replace")[-2000:]
+        raise RuntimeError(f"Failed to build task image:\n{tail}")
+    log(f"Task image '{image}' built successfully.")
+    return image
+
+
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
@@ -135,21 +167,22 @@ def load_config():
 # ---------------------------------------------------------------------------
 
 def resolve_prompt(prompt_ref):
-    """Resolve a prompt reference to (name, content, eval_script_or_None).
+    """Resolve a prompt reference to (name, content, eval_script_or_None, seed_dir_or_None).
 
     Supports two formats:
-      - Old: "prompts/foo.txt"  → reads the file directly, no eval
-      - New: "prompts/foo"      → reads foo/prompt.txt, finds foo/eval.py
+      - Old: "prompts/foo.txt"  → reads the file directly, no eval, no seeds
+      - New: "prompts/foo"      → reads foo/prompt.txt, finds foo/eval.py,
+                                  copies foo/* (except eval.py) as seed files
     """
     ref = BENCH_DIR / prompt_ref
     if ref.is_file() and ref.suffix == ".txt":
-        return ref.stem, ref.read_text(), None
+        return ref.stem, ref.read_text(), None, None
     if ref.is_dir():
         prompt_file = ref / "prompt.txt"
         if not prompt_file.exists():
             raise FileNotFoundError(f"{prompt_file} not found")
         eval_file = ref / "eval.py"
-        return ref.name, prompt_file.read_text(), eval_file if eval_file.exists() else None
+        return ref.name, prompt_file.read_text(), eval_file if eval_file.exists() else None, ref
     raise FileNotFoundError(f"Cannot resolve prompt: {prompt_ref}")
 
 
@@ -158,20 +191,40 @@ def resolve_prompt(prompt_ref):
 # ---------------------------------------------------------------------------
 
 def parse_ndjson(raw_file):
-    """Parse Claude stream-json NDJSON. Returns (result_event, tool_count, thinking_peak)."""
+    """Parse Claude stream-json NDJSON.
+
+    Returns (result_event, tool_count, thinking_peak, timing_breakdown).
+
+    timing_breakdown:
+      - tool_exec_ms: total time spent inside tool calls (bash, read, edit, etc.)
+      - api_wait_ms: time between sending a request and receiving the first
+        assistant content block, summed across turns
+    """
     result = {}
     tool_count = 0
     thinking_peak = 0
+    tool_exec_ms = 0.0
+    api_wait_ms = 0.0
+
+    # Track timestamps: tool_use.id -> ts when the tool was requested
+    pending_tools: dict[str, float] = {}
+    # Track per-turn: ts of last user event -> compute ttft for next assistant
+    last_user_ts: float | None = None
 
     if not raw_file.exists():
-        return result, tool_count, thinking_peak
+        return result, tool_count, thinking_peak, {"tool_exec_ms": 0, "api_wait_ms": 0}
 
     with open(raw_file) as f:
-        for line in f:
-            line = line.strip()
+        for raw_line in f:
+            line = raw_line.strip()
             if not line:
                 continue
+
+            # Extract ts prefix (seconds since stream start)
+            ts_match = re.match(r"^(\d+\.\d+)\s", line)
+            ts = float(ts_match.group(1)) if ts_match else None
             line = re.sub(r"^\d+\.\d+\s", "", line)
+
             try:
                 evt = json.loads(line)
             except json.JSONDecodeError:
@@ -182,16 +235,44 @@ def parse_ndjson(raw_file):
 
             if t == "result":
                 result = evt
+
             elif t == "assistant":
-                for block in evt.get("message", {}).get("content", []):
+                msg = evt.get("message", {})
+                content = msg.get("content", [])
+
+                # TTFT: time since the user event that triggered this response
+                if ts is not None and last_user_ts is not None and content:
+                    api_wait_ms += (ts - last_user_ts) * 1000
+                    last_user_ts = None  # consumed
+
+                for block in content:
                     if block.get("type") == "tool_use":
                         tool_count += 1
+                        tool_id = block.get("id", "")
+                        if ts is not None and tool_id:
+                            pending_tools[tool_id] = ts
+
+            elif t == "user":
+                if ts is not None:
+                    last_user_ts = ts
+
+                # Tool result: compute execution time
+                for block in evt.get("message", {}).get("content", []):
+                    if block.get("type") == "tool_result":
+                        tool_use_id = block.get("tool_use_id", "")
+                        if ts is not None and tool_use_id in pending_tools:
+                            tool_exec_ms += (ts - pending_tools.pop(tool_use_id)) * 1000
+
             elif t == "system" and st == "thinking_tokens":
                 peak = evt.get("estimated_tokens", 0)
                 if peak > thinking_peak:
                     thinking_peak = peak
 
-    return result, tool_count, thinking_peak
+    timing = {
+        "tool_exec_ms": round(tool_exec_ms),
+        "api_wait_ms": round(api_wait_ms),
+    }
+    return result, tool_count, thinking_peak, timing
 
 
 # ---------------------------------------------------------------------------
@@ -223,12 +304,13 @@ def run_eval(eval_script, workdir):
 METRIC_KEYS = [
     "wall_duration_ms", "duration_ms", "duration_api_ms", "ttft_ms",
     "time_to_request_ms", "num_turns", "total_cost_usd", "input_tokens",
-    "output_tokens", "tool_call_count", "thinking_token_peak",
+    "output_tokens", "tool_call_count", "tool_exec_ms", "api_wait_ms",
+    "thinking_token_peak",
 ]
 EVAL_KEYS = ["score"]
 
 
-def extract_metrics(result, wall_duration_ms, tool_count, thinking_peak):
+def extract_metrics(result, wall_duration_ms, tool_count, thinking_peak, timing):
     usage = result.get("usage", {})
 
     def num(key, default=None):
@@ -246,6 +328,8 @@ def extract_metrics(result, wall_duration_ms, tool_count, thinking_peak):
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
         "tool_call_count": tool_count,
+        "tool_exec_ms": timing["tool_exec_ms"],
+        "api_wait_ms": timing["api_wait_ms"],
         "thinking_token_peak": thinking_peak,
     }
 
@@ -304,44 +388,46 @@ def _run_claude_direct(prompt_content, settings_path, cwd, timeout_sec, raw_file
     ]
 
     start_ms = int(time.time() * 1000)
+    start_ts = time.time()
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, cwd=str(cwd),
+                            bufsize=1, text=True)
+
+    # Write NDJSON with fractional-second timestamps (same format as ts %.s)
+    def _write_ts():
+        with open(raw_file, "w") as f:
+            for line in proc.stdout:
+                elapsed = time.time() - start_ts
+                f.write(f"{elapsed:.6f} {line}")
+
+    writer = threading.Thread(target=_write_ts, daemon=True)
+    writer.start()
 
     try:
-        use_ts = shutil.which("ts") is not None
-        if use_ts:
-            with open(raw_file, "w") as out:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(cwd))
-                ts_proc = subprocess.Popen(
-                    ["ts", "%.s"], stdin=proc.stdout, stdout=out, stderr=subprocess.DEVNULL
-                )
-                proc.stdout.close()
-                try:
-                    proc.wait(timeout=timeout_sec)
-                except subprocess.TimeoutExpired:
-                    proc.kill(); proc.wait()
-                    ts_proc.kill(); ts_proc.wait()
-                else:
-                    ts_proc.wait()
-            exit_code = proc.returncode
-        else:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec, cwd=str(cwd))
-            with open(raw_file, "wb") as f:
-                f.write(proc.stdout)
-            exit_code = proc.returncode
+        proc.wait(timeout=timeout_sec)
+        exit_code = proc.returncode
     except subprocess.TimeoutExpired:
+        proc.kill(); proc.wait()
         exit_code = 124
+    writer.join(timeout=10)
 
     end_ms = int(time.time() * 1000)
     return exit_code, end_ms - start_ms
 
 
 def _run_claude_docker(prompt_content, settings_path, cwd, timeout_sec,
-                       raw_file, sandbox_config):
-    """Run Claude Code inside a Docker container with bypassed permissions."""
+                       raw_file, sandbox_config, task_image=None):
+    """Run Claude Code inside a Docker container with bypassed permissions.
+
+    task_image: optional per-prompt image (built from prompt's Dockerfile).
+                When provided, used instead of the base sandbox image.
+    """
     ok, err = _check_docker_available()
     if not ok:
         raise RuntimeError(f"Docker sandbox enabled but unavailable: {err}")
 
-    image = sandbox_config.get("image", "code-bench-sandbox:latest")
+    image = task_image or sandbox_config.get("image", "code-bench-sandbox:latest")
     _ensure_docker_image(image, sandbox_config.get("build_on_start", True))
 
     docker_mode, docker_prefix = _resolve_docker_prefix()
@@ -370,29 +456,47 @@ def _run_claude_docker(prompt_content, settings_path, cwd, timeout_sec,
         cmd = docker_prefix + docker_args
 
     start_ms = int(time.time() * 1000)
+    start_ts = time.time()
+
+    docker_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+
+    # Write NDJSON with fractional-second timestamps
+    def _write_ts():
+        with open(raw_file, "w") as f:
+            for line in docker_proc.stdout:
+                line_str = line.decode("utf-8", errors="replace")
+                elapsed = time.time() - start_ts
+                f.write(f"{elapsed:.6f} {line_str}")
+
+    writer = threading.Thread(target=_write_ts, daemon=True)
+    writer.start()
+
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, timeout=timeout_sec)
-        with open(raw_file, "wb") as f:
-            f.write(proc.stdout)
-        exit_code = proc.returncode
-        if proc.stderr:
-            stderr_text = proc.stderr.decode(errors="replace")[:500]
-            if stderr_text.strip():
-                log(f"Docker stderr: {stderr_text}")
+        docker_proc.wait(timeout=timeout_sec)
+        exit_code = docker_proc.returncode
     except subprocess.TimeoutExpired:
+        docker_proc.kill(); docker_proc.wait()
         exit_code = 124
+    writer.join(timeout=10)
+
+    stderr_output = docker_proc.stderr.read()
+    if stderr_output:
+        stderr_text = stderr_output.decode(errors="replace")[:500]
+        if stderr_text.strip():
+            log(f"Docker stderr: {stderr_text}")
 
     end_ms = int(time.time() * 1000)
     return exit_code, end_ms - start_ms
 
 
 def run_claude(prompt_content, settings_path, cwd, timeout_sec, raw_file,
-               sandbox_config=None):
+               sandbox_config=None, task_image=None):
     """Run Claude Code. Uses Docker sandbox when configured, otherwise direct."""
     if sandbox_config and sandbox_config.get("enabled"):
         return _run_claude_docker(prompt_content, settings_path, cwd,
-                                  timeout_sec, raw_file, sandbox_config)
+                                  timeout_sec, raw_file, sandbox_config,
+                                  task_image=task_image)
     else:
         return _run_claude_direct(prompt_content, settings_path, cwd,
                                   timeout_sec, raw_file)
@@ -425,6 +529,11 @@ def main():
     log(f"Benchmark starting — {len(models)} models x {len(prompt_refs)} prompts x {runs_n} runs ({sandbox_mode})")
     log(f"Results: {results_dir}")
 
+    # Ensure base sandbox image exists before building any task images
+    if sandbox_config and sandbox_config.get("enabled"):
+        base_image = sandbox_config.get("image", "code-bench-sandbox:latest")
+        _ensure_docker_image(base_image, sandbox_config.get("build_on_start", True))
+
     summary_entries = []
 
     for model_cfg in models:
@@ -432,7 +541,15 @@ def main():
         settings_path = write_temp_settings(model_cfg, results_dir)
 
         for prompt_ref in prompt_refs:
-            prompt_name, prompt_content, eval_script = resolve_prompt(prompt_ref)
+            prompt_name, prompt_content, eval_script, seed_dir = resolve_prompt(prompt_ref)
+
+            # Build task-specific Docker image if prompt has a Dockerfile
+            task_image = None
+            if sandbox_config and sandbox_config.get("enabled"):
+                task_image = _ensure_prompt_image(
+                    seed_dir, prompt_name,
+                    sandbox_config.get("build_on_start", True)
+                )
 
             run_dir = results_dir / f"{model_name}__{prompt_name}"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -463,13 +580,25 @@ def main():
                         if tmpl.is_dir():
                             shutil.copytree(tmpl, workdir, dirs_exist_ok=True)
 
+                    # Copy prompt seed files (everything except eval.py)
+                    if seed_dir and seed_dir.is_dir():
+                        for src in seed_dir.iterdir():
+                            if src.name == "eval.py":
+                                continue
+                            dst = workdir / src.name
+                            if src.is_file():
+                                shutil.copy2(src, dst)
+                            elif src.is_dir() and not dst.exists():
+                                shutil.copytree(src, dst)
+
                     raw_file = run_dir / f"run-{run_i}.ndjson"
                     exit_code, wall_dur = run_claude(
                         prompt_content, settings_path, workdir, timeout_sec, raw_file,
                         sandbox_config=sandbox_config,
+                        task_image=task_image,
                     )
 
-                    result, tool_count, thinking_peak = parse_ndjson(raw_file)
+                    result, tool_count, thinking_peak, timing = parse_ndjson(raw_file)
 
                     if exit_code == 124:
                         status = "timeout"
@@ -484,7 +613,7 @@ def main():
                         status = "success"
                         error_msg = None
 
-                    metrics = extract_metrics(result, wall_dur, tool_count, thinking_peak)
+                    metrics = extract_metrics(result, wall_dur, tool_count, thinking_peak, timing)
                     result_model_name = None
                     mu = result.get("modelUsage", {})
                     if mu:
@@ -519,6 +648,17 @@ def main():
                         json.dump(metrics_record, f, indent=2)
 
                     run_metrics_files.append(metrics_file)
+
+                    # Generate HTML visualization
+                    try:
+                        html_file = run_dir / f"run-{run_i}.html"
+                        subprocess.run(
+                            [sys.executable, str(BENCH_DIR / "view_run.py"),
+                             str(raw_file), "-o", str(html_file)],
+                            capture_output=True, timeout=30,
+                        )
+                    except Exception:
+                        pass  # HTML generation is best-effort, don't fail the run
 
                     if status == "success":
                         success = True
