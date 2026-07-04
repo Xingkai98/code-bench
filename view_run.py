@@ -2,6 +2,7 @@
 """Generate a standalone HTML viewer for a Claude Code NDJSON run file."""
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +31,8 @@ def parse_ndjson(ndjson_path):
             if not line:
                 continue
             try:
+                # Strip optional ts prefix (seconds since start)
+                line = re.sub(r"^\d+\.\d+\s", "", line)
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue

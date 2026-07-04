@@ -372,6 +372,118 @@ def aggregate(metrics_files):
 
 
 # ---------------------------------------------------------------------------
+# HTML index
+# ---------------------------------------------------------------------------
+
+def write_index_html(results_dir, summary_entries):
+    """Generate index.html — unified entry point for the results directory."""
+    import html as html_mod
+
+    # Build per-model per-prompt rows from summary
+    rows_html = []
+    for e in summary_entries:
+        m = e.get("metrics", {})
+        model_config = e.get("model_config", "?")
+        model_name = e.get("model_name", model_config)
+        prompt = e.get("prompt", "?")
+        ok = e.get("successful_runs", 0)
+        total = e.get("total_runs", 0)
+        dir_name = f"{model_config}__{prompt}"
+
+        score = m.get("score", {}).get("avg")
+        score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "-"
+
+        def _av(key):
+            v = m.get(key, {}).get("avg")
+            return v if isinstance(v, (int, float)) else None
+
+        dur = _av("duration_ms")
+        api_wait = _av("api_wait_ms")
+        tool_exec = _av("tool_exec_ms")
+        cost = _av("total_cost_usd")
+        tokens_in = _av("input_tokens")
+        tokens_out = _av("output_tokens")
+        tools = _av("tool_call_count")
+
+        # Build links to individual run HTMLs
+        run_links = []
+        run_dir = results_dir / dir_name
+        if run_dir.exists():
+            for rf in sorted(run_dir.glob("run-*.html")):
+                run_name = rf.stem
+                rel = f"{dir_name}/{rf.name}"
+                run_links.append(f'<a href="{html_mod.escape(rel)}">{run_name}</a>')
+
+        fmt = lambda v, u="": f"{v:,.0f}{u}" if isinstance(v, (int, float)) else "-"
+        fmt_ms = lambda v: f"{v/1000:.1f}s" if isinstance(v, (int, float)) else "-"
+        fmt_usd = lambda v: f"${v:.4f}" if isinstance(v, (int, float)) else "-"
+
+        status_class = "ok" if ok == total else ("warn" if ok > 0 else "err")
+        status_text = f"{ok}/{total}"
+
+        rows_html.append(f"""<tr>
+            <td class="{status_class}">{html_mod.escape(model_name)}</td>
+            <td>{html_mod.escape(prompt)}</td>
+            <td class="num {status_class}">{status_text}</td>
+            <td class="num">{score_str}</td>
+            <td class="num">{fmt_ms(dur)}</td>
+            <td class="num">{fmt_ms(api_wait)}</td>
+            <td class="num">{fmt_ms(tool_exec)}</td>
+            <td class="num">{fmt_usd(cost)}</td>
+            <td class="num">{fmt(tokens_in)}</td>
+            <td class="num">{fmt(tokens_out)}</td>
+            <td class="num">{fmt(tools)}</td>
+            <td class="links">{' '.join(run_links)}</td>
+        </tr>""")
+
+    timestamp = results_dir.name
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bench Results — {timestamp}</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+       background:#0d1117; color:#c9d1d9; padding:20px; max-width:1400px; margin:0 auto; }}
+h1 {{ color:#f0f6fc; margin-bottom:4px; }}
+.sub {{ color:#8b949e; font-size:13px; margin-bottom:20px; }}
+table {{ width:100%; border-collapse:collapse; }}
+th {{ text-align:left; padding:8px 12px; border-bottom:1px solid #30363d;
+      font-size:11px; color:#8b949e; text-transform:uppercase; letter-spacing:0.5px; }}
+td {{ padding:8px 12px; border-bottom:1px solid #21262d; font-size:14px; }}
+tr:hover {{ background:#161b22; }}
+.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+.ok {{ color:#3fb950; }}
+.warn {{ color:#d29922; }}
+.err {{ color:#f85149; }}
+.links a {{ color:#58a6ff; text-decoration:none; margin-right:6px; font-size:12px; }}
+.links a:hover {{ text-decoration:underline; }}
+</style>
+</head>
+<body>
+<h1>Bench Results</h1>
+<p class="sub">{timestamp} — {len(summary_entries)} entries</p>
+<table>
+<thead><tr>
+    <th>Model</th><th>Prompt</th><th>Runs</th><th>Score</th>
+    <th>Duration</th><th>API Wait</th><th>Tool Exec</th><th>Cost</th>
+    <th>Tok In</th><th>Tok Out</th><th>Tools</th><th>Details</th>
+</tr></thead>
+<tbody>
+{''.join(rows_html)}
+</tbody>
+</table>
+</body>
+</html>"""
+
+    index_file = results_dir / "index.html"
+    index_file.write_text(html)
+    return index_file
+
+
+# ---------------------------------------------------------------------------
 # claude invocation
 # ---------------------------------------------------------------------------
 
@@ -693,32 +805,36 @@ def main():
     subprocess.run([sys.executable, str(BENCH_DIR / "report.py"), str(summary_file), str(report_file)])
     log(f"Report: {report_file}")
 
-    # feishu upload
-    report_title = f"Bench Report — {timestamp}"
-    lark_cli = shutil.which("lark-cli") or shutil.which("lark-cli", path=os.path.expanduser("~/.npm-global/bin"))
-    if not lark_cli:
-        for p in ["~/.npm-global/bin", "~/node_modules/.bin"]:
-            candidate = Path(os.path.expanduser(p)) / "lark-cli"
-            if candidate.exists():
-                lark_cli = str(candidate)
-                break
+    # HTML index
+    index_file = write_index_html(results_dir, summary_entries)
+    log(f"Index: file://{index_file}")
 
-    if lark_cli:
-        log("Uploading to Feishu...")
-        try:
-            content = report_file.read_text()
-            folder_token = cfg.get("feishu_folder_token", "")
-            cmd = [lark_cli, "docs", "+create",
-                   "--title", report_title,
-                   "--content", "-",
-                   "--doc-format", "markdown"]
-            if folder_token:
-                cmd += ["--parent-token", folder_token]
-            subprocess.run(cmd, input=content, text=True, check=True)
-        except Exception as e:
-            log(f"Feishu upload failed: {e}. Local report: {report_file}")
-    else:
-        log(f"lark-cli not found, skipping Feishu upload. Report: {report_file}")
+    # feishu upload
+    # report_title = f"Bench Report — {timestamp}"
+    # lark_cli = shutil.which("lark-cli") or shutil.which("lark-cli", path=os.path.expanduser("~/.npm-global/bin"))
+    # if not lark_cli:
+    #     for p in ["~/.npm-global/bin", "~/node_modules/.bin"]:
+    #         candidate = Path(os.path.expanduser(p)) / "lark-cli"
+    #         if candidate.exists():
+    #             lark_cli = str(candidate)
+    #             break
+
+    # if lark_cli:
+    #     log("Uploading to Feishu...")
+    #     try:
+    #         content = report_file.read_text()
+    #         folder_token = cfg.get("feishu_folder_token", "")
+    #         cmd = [lark_cli, "docs", "+create",
+    #                "--title", report_title,
+    #                "--content", "-",
+    #                "--doc-format", "markdown"]
+    #         if folder_token:
+    #             cmd += ["--parent-token", folder_token]
+    #         subprocess.run(cmd, input=content, text=True, check=True)
+    #     except Exception as e:
+    #         log(f"Feishu upload failed: {e}. Local report: {report_file}")
+    # else:
+    #     log(f"lark-cli not found, skipping Feishu upload. Report: {report_file}")
 
     log(f"Done. Results: {results_dir}")
 
