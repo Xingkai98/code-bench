@@ -1,50 +1,42 @@
-This repository contains an old tiny C frontend written in C++.
+这个仓库里有一个很老的 C++ tiny C frontend。
 
-Your task is to fix it and give it a stable command-line contract. You may
-rewrite internals, but keep the project as a CMake-built executable named
-`cparser`.
+你的任务是修复它，并给它一个稳定的命令行契约。你可以重写内部实现，但项目仍然必须通过 CMake 构建出名为 `cparser` 的可执行文件。
 
-## Required CLI
+## 必须支持的 CLI
 
-The executable must read the entire program/expression from stdin and support
-these modes:
+可执行文件必须从 stdin 读取完整的程序片段或表达式，并支持这些模式：
 
 - `cparser --tokens`
-  - Lex stdin and print one token per line as `TYPE:lexeme`.
-  - Required token types: `KEYWORD`, `IDENT`, `INT`, `OP`, `LPAREN`, `RPAREN`,
-    `LBRACE`, `RBRACE`, `SEMI`, `COMMA`.
-  - Supported keywords include at least: `int`, `return`, `if`, `else`, `while`,
-    `for`, `void`.
-  - Supported operators include at least: `+`, `-`, `*`, `/`, `=`, `==`, `<`,
-    `<=`, `>`, `>=`, `!=`.
+  - 对 stdin 做词法分析，每行输出一个 token，格式为 `TYPE:lexeme`。
+  - 必须支持的 token 类型：`KEYWORD`、`IDENT`、`INT`、`OP`、`LPAREN`、`RPAREN`、`LBRACE`、`RBRACE`、`SEMI`、`COMMA`。
+  - 至少支持这些关键字：`int`、`return`、`if`、`else`、`while`、`for`、`void`。
+  - 至少支持这些运算符：`+`、`-`、`*`、`/`、`=`、`==`、`<`、`<=`、`>`、`>=`、`!=`。
 - `cparser --parse`
-  - Parse stdin as an integer arithmetic expression.
-  - On success, print exactly `OK` and exit 0.
-  - On failure, print a message beginning with `ERROR:` to stderr and exit nonzero.
+  - 将 stdin 当作整数算术表达式解析。
+  - 成功时只输出 `OK`，并以退出码 0 退出。
+  - 失败时向 stderr 输出以 `ERROR:` 开头的信息，并以非 0 退出码退出。
 - `cparser --eval`
-  - Parse and evaluate stdin as an integer arithmetic expression.
-  - On success, print the integer result and exit 0.
-  - On failure, print a message beginning with `ERROR:` to stderr and exit nonzero.
+  - 将 stdin 当作整数算术表达式解析并求值。
+  - 成功时输出整数结果，并以退出码 0 退出。
+  - 失败时向 stderr 输出以 `ERROR:` 开头的信息，并以非 0 退出码退出。
 
-## Expression Grammar
+## 表达式语法
 
-Support integer literals, parentheses, `+`, `-`, `*`, `/`, normal precedence,
-and left associativity. Whitespace may be spaces, tabs, or newlines. `//` line
-comments and `/* ... */` block comments must be ignored in every mode.
+支持整数 literal、括号、`+`、`-`、`*`、`/`，并实现正常的运算符优先级和左结合。空白字符可以是空格、tab 或换行。所有模式都必须忽略 `//` 行注释和 `/* ... */` 块注释。
 
-Examples:
+示例：
 
-- `2+3*4` evaluates to `14`
-- `(2+3)*4` evaluates to `20`
-- `8-3-2` evaluates to `3`
-- `8/4/2` evaluates to `1`
+- `2+3*4` 的求值结果是 `14`
+- `(2+3)*4` 的求值结果是 `20`
+- `8-3-2` 的求值结果是 `3`
+- `8/4/2` 的求值结果是 `1`
 
-Malformed input must not hang. It must fail with a nonzero exit code.
+格式错误的输入不能卡死，必须以非 0 退出码失败。
 
-## Constraints
+## 约束
 
-- Keep the CMake project buildable with `cmake -S . -B build && cmake --build build`.
-- Keep the executable name `cparser`.
-- Do not require external runtime dependencies.
-- You may add files and tests.
-- Use `python3 test_basic.py` for a visible smoke check.
+- CMake 项目必须能通过 `cmake -S . -B build && cmake --build build` 构建。
+- 可执行文件名称必须保持为 `cparser`。
+- 不要依赖额外的外部运行时依赖。
+- 可以添加文件和测试。
+- 可以用 `python3 test_basic.py` 做可见 smoke check。

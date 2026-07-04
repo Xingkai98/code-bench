@@ -1,45 +1,40 @@
-This repository contains a small C++ tiny C frontend. Your task is to add a
-black-box pytest test suite for its command-line behavior.
+这个仓库里有一个小型 C++ tiny C frontend。你的任务是为它的命令行行为添加黑盒 pytest 测试套件。
 
-Do not fix or refactor the implementation. Only add tests.
+不要修复或重构实现。只添加测试。
 
-## CLI specification to test
+## 需要测试的 CLI 规格
 
-The project builds with:
+项目通过以下命令构建：
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-The build must produce an executable named `cparser`.
+构建结果必须包含名为 `cparser` 的可执行文件。
 
-The executable reads all input from stdin and supports:
+可执行文件从 stdin 读取完整输入，并支持：
 
 - `cparser --tokens`
-  - prints one token per line as `TYPE:lexeme`
-  - token types include `KEYWORD`, `IDENT`, `INT`, `OP`, `LPAREN`, `RPAREN`,
-    `LBRACE`, `RBRACE`, `SEMI`, `COMMA`
-  - supported operators include `+`, `-`, `*`, `/`, `=`, `==`, `<`, `<=`, `>`,
-    `>=`, `!=`
+  - 每行输出一个 token，格式为 `TYPE:lexeme`
+  - token 类型包括 `KEYWORD`、`IDENT`、`INT`、`OP`、`LPAREN`、`RPAREN`、`LBRACE`、`RBRACE`、`SEMI`、`COMMA`
+  - 支持的运算符包括 `+`、`-`、`*`、`/`、`=`、`==`、`<`、`<=`、`>`、`>=`、`!=`
 - `cparser --parse`
-  - parses stdin as an integer arithmetic expression
-  - prints exactly `OK` and exits 0 on success
-  - exits nonzero and writes an `ERROR:` message to stderr on malformed input
+  - 将 stdin 当作整数算术表达式解析
+  - 成功时只输出 `OK`，并以退出码 0 退出
+  - 格式错误时以非 0 退出码退出，并向 stderr 输出 `ERROR:` 信息
 - `cparser --eval`
-  - evaluates integer arithmetic expressions with parentheses, `+`, `-`, `*`,
-    `/`, normal precedence, and left associativity
-  - prints the integer result on success
+  - 对包含括号、`+`、`-`、`*`、`/` 的整数算术表达式求值
+  - 必须实现正常优先级和左结合
+  - 成功时输出整数结果
 
-Whitespace includes spaces, tabs, and newlines. `//` line comments and
-`/* ... */` block comments are ignored. Malformed input must not hang.
+空白字符包括空格、tab 和换行。`//` 行注释和 `/* ... */` 块注释应被忽略。格式错误的输入不能卡死。
 
-## Requirements
+## 要求
 
-- Add pytest tests under `tests/`.
-- Tests should build the project in a temporary or local build directory and
-  invoke the `cparser` executable through subprocess.
-- Keep tests black-box: assert CLI behavior, not private implementation details.
-- Do not modify `main.cpp`, `CMakeLists.txt`, or other implementation files.
-- It is okay if your tests expose bugs in the current implementation.
-- Use `python3 test_basic.py` only to check that pytest can discover your tests.
+- 在 `tests/` 下添加 pytest 测试。
+- 测试应在临时或本地 build 目录中构建项目，并通过 subprocess 调用 `cparser` 可执行文件。
+- 保持黑盒测试：断言 CLI 行为，不要依赖私有实现细节。
+- 不要修改 `main.cpp`、`CMakeLists.txt` 或其他实现文件。
+- 你的测试暴露当前实现中的 bug 是可以的。
+- `python3 test_basic.py` 只用于检查 pytest 能否发现你的测试。
