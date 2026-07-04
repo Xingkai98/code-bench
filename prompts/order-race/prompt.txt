@@ -1,0 +1,11 @@
+当前目录下有 inventory.py 和 orders.py，实现了一个带库存预留的订单处理系统。单线程下功能正常（`python3 test_basic.py` 全部通过），但在并发场景下会出现 bug（超额扣库存、重复处理订单）。
+
+请修复这两个文件中的并发问题。
+
+## 约束
+
+- 必须编辑 inventory.py 和 orders.py
+- 类名、方法名、方法签名不能改：
+  - `Inventory(initial_stock: dict)`, `.reserve(item_id, qty) -> bool`, `.rollback(item_id, qty)`, `.get_stock(item_id) -> int`
+  - `OrderProcessor(inventory: Inventory)`, `.process(order_id, items: dict) -> bool`, `.is_processed(order_id) -> bool`
+- 用 `python3 test_basic.py` 确认基础功能没有被破坏

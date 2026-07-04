@@ -1,0 +1,66 @@
+当前目录下有 `payments.py`，包含一个支付 webhook 处理器模板。
+
+请实现 `payments.py`。
+
+## 事件格式
+
+`handle_event(event)` 会收到 dict：
+
+```python
+{
+    "event_id": "evt-1",
+    "order_id": "order-1",
+    "type": "payment_authorized" | "payment_captured" | "payment_failed" | "refund_issued",
+    "amount": 100
+}
+```
+
+`amount` 是整数，必须为正数。`payment_failed` 可以忽略 amount。
+
+## 订单状态
+
+订单初始状态是 `new`，金额字段都是 0：
+
+- `authorized_amount`
+- `captured_amount`
+- `refunded_amount`
+
+合法状态迁移：
+
+- `payment_authorized`
+  - 只允许在 `new` 或 `authorized` 状态处理。
+  - 成功后状态为 `authorized`，并记录 `authorized_amount`。
+  - 已经 `captured`、`refunded` 或 `failed` 的订单不能再被 authorization 倒退。
+- `payment_captured`
+  - 允许在 `new` 或 `authorized` 状态处理，成功后状态为 `captured`。
+  - 如果构造函数传入了 `expected_amounts`，累计 captured 金额不能超过该订单的 expected amount。
+  - 如果没有 expected amount，则仍然要求 amount 为正数。
+- `payment_failed`
+  - 只允许在还没有 capture/refund 时处理。
+  - 已经 `captured` 或 `refunded` 的订单不能倒退为 `failed`。
+- `refund_issued`
+  - 只允许在 `captured` 或 `refunded` 状态处理。
+  - 累计 refunded 金额不能超过 captured 金额。
+  - 全额退款后状态为 `refunded`；部分退款后状态仍为 `captured`。
+
+## 幂等和并发要求
+
+- 同一个 `event_id` 重复投递时，不能重复产生副作用。
+- 重复事件应返回 `duplicate: True`。
+- 不同事件并发处理同一个订单时，最终状态和金额也必须满足上面的规则。
+- 业务规则不允许的事件应返回 `ok: False`，且不能修改订单金额或状态。
+
+## API 约束
+
+- 必须编辑 `payments.py`。
+- 不能改 public API：
+  - `PaymentProcessor(expected_amounts=None)`
+  - `.handle_event(event) -> dict`
+  - `.get_order(order_id) -> dict`
+- `handle_event` 返回 dict，至少包含：
+  - `ok`
+  - `duplicate`
+  - `status`
+  - `error`
+- 可以添加私有辅助方法或私有字段。
+- 用 `python3 test_basic.py` 确认基础功能没有被破坏。

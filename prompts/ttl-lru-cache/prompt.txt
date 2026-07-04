@@ -1,0 +1,32 @@
+当前目录下有 `cache.py`，包含一个带 TTL 的固定容量缓存模板。
+
+请实现 `cache.py`。
+
+## 需要满足的行为
+
+- `TTLCache(capacity, ttl_seconds, clock=None)`
+  - `capacity` 是最多保存的未过期 key 数量。
+  - `ttl_seconds` 是每次写入后的存活时间。
+  - `clock` 是可选的无参数函数，返回当前时间；如果传入，必须使用它，不要直接依赖真实时间。
+- `set(key, value)`
+  - 写入新 key 或覆盖旧 key。
+  - 覆盖旧 key 时必须刷新值、刷新 TTL，并把该 key 视为最近使用。
+  - 如果容量超限，淘汰最近最少使用的未过期 key。
+- `get(key)`
+  - key 不存在或已过期时返回 `None`。
+  - key 命中且未过期时返回 value，并把该 key 视为最近使用。
+- `delete(key)`
+  - 删除 key；key 不存在时也不能报错。
+- 过期边界：当 `clock() >= expires_at` 时，key 已经过期。
+- `capacity <= 0` 时缓存不应保存任何内容。
+
+## 约束
+
+- 必须编辑 `cache.py`。
+- 不能改 public API：
+  - `TTLCache(capacity, ttl_seconds, clock=None)`
+  - `.get(key)`
+  - `.set(key, value)`
+  - `.delete(key)`
+- 可以添加私有辅助方法或私有字段。
+- 用 `python3 test_basic.py` 确认基础功能没有被破坏。
