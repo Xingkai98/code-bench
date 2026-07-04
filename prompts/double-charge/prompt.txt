@@ -1,0 +1,43 @@
+当前目录下是一个秒杀促销系统的后端代码，包含以下文件：
+
+  main.py          — CLI 入口（薄封装层）
+  models.py        — 数据模型：Product, Order, Payment，状态枚举
+  db.py            — JSON 文件存储，用 sleep() 模拟 I/O 延迟
+  exceptions.py    — 自定义异常
+  inventory.py     — 库存管理：商品查询、预留、释放
+  payment.py       — 支付处理：收款、退款
+  orders.py        — 订单编排：下单流程协调库存 + 支付 + 优惠券
+  pricing.py       — 优惠券管理：创建、限额使用
+  notification.py  — 邮件通知（非核心）
+  test_basic.py    — 单线程冒烟测试
+
+## 问题报告
+
+上周上线后，客服和运营反馈了以下几个问题：
+
+1. **重复扣款**：秒杀高峰期间，有用户投诉同一笔订单被扣了两次款。比如订单金额 100 元，信用卡账单显示两笔 100 元。
+2. **库存变负**：运营发现大促结束后，部分商品的后台库存数变成了负数。但进货记录和销售记录都对不上。
+3. **优惠券超发**：限量 100 张的优惠券，系统显示被领取了 103 次。财务对账时发现优惠金额超出了预算。
+4. **下单失败但库存扣了**：部分用户下单时提示失败，但再次尝试时发现商品已售罄，说明上一次失败的请求已经扣了库存。
+
+这些问题只在高并发时出现，单线程测试（`python3 test_basic.py`）全部通过。
+
+## 你的任务
+
+定位并修复这些问题的根因。Start by reading through the code to understand the data flow and call chains，然后修复所有并发相关的 bug。不要只修一个文件就认为完成了——问题可能跨多个模块。
+
+## 约束
+
+1. **保留所有公开 API 的签名**（类名、方法名、参数列表不能改）：
+   - `Inventory(db)` — `.reserve(product_id, quantity) -> bool`, `.release(product_id, quantity)`, `.get_stock(product_id) -> int`, `.get_product(product_id) -> Product`
+   - `PaymentService(db)` — `.charge(order_id, amount, card_token) -> dict`, `.refund(payment_id) -> dict`, `.get_payment(payment_id) -> Payment`, `.get_payments_for_order(order_id) -> list[Payment]`
+   - `OrderService(db, inventory, payment, coupons)` — `.place_order(order_id, items, card_token, coupon_code) -> Order`, `.get_order(order_id) -> Order`, `.cancel_order(order_id) -> Order`
+   - `CouponManager(db)` — `.create_coupon(code, discount_rate, max_uses)`, `.apply_coupon(code, order_amount) -> dict`, `.get_remaining_uses(code) -> int`
+
+2. **可以添加私有方法和字段**，但不能改公开 API。
+
+3. **用 `python3 test_basic.py` 确认**你的修改没有破坏现有单线程功能。
+
+4. `db.py` 中的 `time.sleep()` 模拟真实 I/O 延迟。**删除 sleep 不是正确的修复方式**——你的方案必须在存在这些延迟的情况下仍然正确。
+
+5. 仔细想清楚完整的下单链路：验证 → 预留库存 → 应用优惠券 → 收款 → 确认。每一个环节失败时，之前的操作应该如何处理？
