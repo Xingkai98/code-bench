@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,95 @@ def write_temp_settings(model_cfg, results_dir):
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Docker helpers
+# ---------------------------------------------------------------------------
+
+_docker_prefix_cache = None
+
+
+def _check_docker_available():
+    """Check that Docker is installed and the socket is reachable.
+
+    Returns (True, None) or (False, error_message).
+    """
+    if not shutil.which("docker"):
+        return False, "Docker is not installed. Install Docker or disable sandbox mode."
+    try:
+        _resolve_docker_prefix()
+        return True, None
+    except RuntimeError as e:
+        return False, str(e)
+
+
+def _resolve_docker_prefix():
+    """Return (mode, prefix_list) for docker CLI. Result is cached.
+
+    Tries: direct docker → sg docker → sudo docker.
+    """
+    global _docker_prefix_cache
+    if _docker_prefix_cache is not None:
+        return _docker_prefix_cache
+
+    def _try(cmd, timeout=5):
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=timeout)
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    # 1. Try direct docker
+    if _try(["docker", "ps"]):
+        _docker_prefix_cache = ("list", ["docker"])
+        return _docker_prefix_cache
+
+    # 2. Try sg docker
+    if _try(["sg", "docker", "-c", "docker ps"]):
+        _docker_prefix_cache = ("shell", ["sg", "docker", "-c"])
+        return _docker_prefix_cache
+
+    # 3. Try sudo docker (non-interactive)
+    if _try(["sudo", "-n", "docker", "ps"]):
+        _docker_prefix_cache = ("list", ["sudo", "-n", "docker"])
+        return _docker_prefix_cache
+
+    raise RuntimeError(
+        "Cannot access Docker. Run 'newgrp docker' or restart terminal."
+    )
+
+
+def _run_docker(cmd_args):
+    """Run a docker command using the resolved prefix."""
+    mode, prefix = _resolve_docker_prefix()
+    if mode == "shell":
+        full_cmd = prefix + ["docker " + shlex.join(cmd_args)]
+    else:
+        full_cmd = prefix + cmd_args
+    return subprocess.run(full_cmd, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+
+
+def _ensure_docker_image(image, build_on_start):
+    """Ensure Docker image exists; optionally auto-build it."""
+    result = _run_docker(["image", "inspect", image])
+    if result.returncode == 0:
+        return
+
+    if not build_on_start:
+        raise RuntimeError(
+            f"Docker image '{image}' not found. "
+            f"Build it with: docker build -t {image} {BENCH_DIR}"
+        )
+
+    log(f"Building Docker image '{image}' (first run, this may take a few minutes)...")
+    build = _run_docker(["build", "-t", image, str(BENCH_DIR)])
+    if build.returncode != 0:
+        tail = build.stdout.decode(errors="replace")[-2000:]
+        raise RuntimeError(f"Failed to build Docker image:\n{tail}")
+    log(f"Docker image '{image}' built successfully.")
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +291,8 @@ def aggregate(metrics_files):
 # claude invocation
 # ---------------------------------------------------------------------------
 
-def run_claude(prompt_content, settings_path, cwd, timeout_sec, raw_file):
-    """Run Claude Code inside *cwd*. Returns (exit_code, wall_duration_ms)."""
+def _run_claude_direct(prompt_content, settings_path, cwd, timeout_sec, raw_file):
+    """Run Claude Code directly on the host (non-Docker path)."""
     cmd = [
         "claude", "-p",
         "--bare",
@@ -244,6 +334,70 @@ def run_claude(prompt_content, settings_path, cwd, timeout_sec, raw_file):
     return exit_code, end_ms - start_ms
 
 
+def _run_claude_docker(prompt_content, settings_path, cwd, timeout_sec,
+                       raw_file, sandbox_config):
+    """Run Claude Code inside a Docker container with bypassed permissions."""
+    ok, err = _check_docker_available()
+    if not ok:
+        raise RuntimeError(f"Docker sandbox enabled but unavailable: {err}")
+
+    image = sandbox_config.get("image", "code-bench-sandbox:latest")
+    _ensure_docker_image(image, sandbox_config.get("build_on_start", True))
+
+    docker_mode, docker_prefix = _resolve_docker_prefix()
+
+    container_settings = "/tmp/settings.json"
+    container_workspace = "/workspace"
+
+    docker_args = [
+        "run", "--rm",
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-e", "HOME=/tmp",
+        "-v", f"{cwd}:{container_workspace}",
+        "-v", f"{settings_path}:{container_settings}:ro",
+        "-w", container_workspace,
+        image,
+        "claude", "-p", "--bare",
+        "--dangerously-skip-permissions",
+        "--settings", container_settings,
+        "--output-format", "stream-json", "--verbose",
+        prompt_content,
+    ]
+
+    if docker_mode == "shell":
+        cmd = docker_prefix + ["docker " + shlex.join(docker_args)]
+    else:
+        cmd = docker_prefix + docker_args
+
+    start_ms = int(time.time() * 1000)
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=timeout_sec)
+        with open(raw_file, "wb") as f:
+            f.write(proc.stdout)
+        exit_code = proc.returncode
+        if proc.stderr:
+            stderr_text = proc.stderr.decode(errors="replace")[:500]
+            if stderr_text.strip():
+                log(f"Docker stderr: {stderr_text}")
+    except subprocess.TimeoutExpired:
+        exit_code = 124
+
+    end_ms = int(time.time() * 1000)
+    return exit_code, end_ms - start_ms
+
+
+def run_claude(prompt_content, settings_path, cwd, timeout_sec, raw_file,
+               sandbox_config=None):
+    """Run Claude Code. Uses Docker sandbox when configured, otherwise direct."""
+    if sandbox_config and sandbox_config.get("enabled"):
+        return _run_claude_docker(prompt_content, settings_path, cwd,
+                                  timeout_sec, raw_file, sandbox_config)
+    else:
+        return _run_claude_direct(prompt_content, settings_path, cwd,
+                                  timeout_sec, raw_file)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -254,6 +408,7 @@ def main():
     timeout_sec = cfg["timeout_seconds"]
     retry = cfg["retry_count"]
     template_dir = cfg.get("template_dir")
+    sandbox_config = cfg.get("sandbox", None)
     models = cfg["models"]
     prompt_refs = cfg["prompts"]
 
@@ -266,7 +421,8 @@ def main():
     results_dir = BENCH_DIR / "results" / timestamp
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    log(f"Benchmark starting — {len(models)} models x {len(prompt_refs)} prompts x {runs_n} runs")
+    sandbox_mode = "Docker sandbox" if (sandbox_config and sandbox_config.get("enabled")) else "direct"
+    log(f"Benchmark starting — {len(models)} models x {len(prompt_refs)} prompts x {runs_n} runs ({sandbox_mode})")
     log(f"Results: {results_dir}")
 
     summary_entries = []
@@ -309,7 +465,8 @@ def main():
 
                     raw_file = run_dir / f"run-{run_i}.ndjson"
                     exit_code, wall_dur = run_claude(
-                        prompt_content, settings_path, workdir, timeout_sec, raw_file
+                        prompt_content, settings_path, workdir, timeout_sec, raw_file,
+                        sandbox_config=sandbox_config,
                     )
 
                     result, tool_count, thinking_peak = parse_ndjson(raw_file)

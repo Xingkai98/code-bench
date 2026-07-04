@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-EXPECTED = "3"
+EXPECTED = "5"
 
 
 def main():
