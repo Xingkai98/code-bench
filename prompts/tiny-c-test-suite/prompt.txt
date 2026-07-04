@@ -1,0 +1,45 @@
+This repository contains a small C++ tiny C frontend. Your task is to add a
+black-box pytest test suite for its command-line behavior.
+
+Do not fix or refactor the implementation. Only add tests.
+
+## CLI specification to test
+
+The project builds with:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+The build must produce an executable named `cparser`.
+
+The executable reads all input from stdin and supports:
+
+- `cparser --tokens`
+  - prints one token per line as `TYPE:lexeme`
+  - token types include `KEYWORD`, `IDENT`, `INT`, `OP`, `LPAREN`, `RPAREN`,
+    `LBRACE`, `RBRACE`, `SEMI`, `COMMA`
+  - supported operators include `+`, `-`, `*`, `/`, `=`, `==`, `<`, `<=`, `>`,
+    `>=`, `!=`
+- `cparser --parse`
+  - parses stdin as an integer arithmetic expression
+  - prints exactly `OK` and exits 0 on success
+  - exits nonzero and writes an `ERROR:` message to stderr on malformed input
+- `cparser --eval`
+  - evaluates integer arithmetic expressions with parentheses, `+`, `-`, `*`,
+    `/`, normal precedence, and left associativity
+  - prints the integer result on success
+
+Whitespace includes spaces, tabs, and newlines. `//` line comments and
+`/* ... */` block comments are ignored. Malformed input must not hang.
+
+## Requirements
+
+- Add pytest tests under `tests/`.
+- Tests should build the project in a temporary or local build directory and
+  invoke the `cparser` executable through subprocess.
+- Keep tests black-box: assert CLI behavior, not private implementation details.
+- Do not modify `main.cpp`, `CMakeLists.txt`, or other implementation files.
+- It is okay if your tests expose bugs in the current implementation.
+- Use `python3 test_basic.py` only to check that pytest can discover your tests.

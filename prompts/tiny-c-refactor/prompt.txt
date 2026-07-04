@@ -1,0 +1,41 @@
+This C++ project already implements the required tiny C frontend behavior, but
+the implementation is intentionally coupled and brittle.
+
+Refactor it without changing the command-line behavior.
+
+## Behavior that must remain compatible
+
+The CMake project must still build an executable named `cparser`.
+
+- `cparser --tokens` reads stdin and prints one token per line as `TYPE:lexeme`.
+- `cparser --parse` reads stdin as an integer arithmetic expression, prints
+  `OK` on success, and exits nonzero with `ERROR:` on malformed input.
+- `cparser --eval` reads stdin as an integer arithmetic expression and prints
+  the integer result.
+
+Supported expression syntax: integer literals, parentheses, `+`, `-`, `*`,
+`/`, normal precedence, and left associativity. Spaces, tabs, newlines, `//`
+comments, and `/* ... */` comments are ignored.
+
+## Required refactor
+
+- Introduce a structured token model:
+  - define `enum class TokenType`
+  - define a `Token` struct/class containing at least type and lexeme/text
+- Lexer must expose this reusable API:
+  - `Lexer lexer;`
+  - `std::vector<Token> tokens = lexer.tokenize(input);`
+- Parser must expose this reusable API:
+  - `Parser parser(tokens);`
+  - `bool ok = parser.parse();`
+  - `int value = parser.evaluate();`
+- Parser must accept a token stream directly, rather than reading lexer globals
+  or constructing its own lexer internally.
+- Remove global parser/lexer state from the core implementation.
+- Remove fixed-size core parsing buffers and library-level `exit()`/`system()`.
+- Keep CLI I/O in `main.cpp`; lexer and parser should be reusable from tests.
+
+You may change public C++ APIs as needed to satisfy the refactor, but keep the
+CLI contract unchanged.
+
+Run `python3 test_basic.py` for a visible smoke check.

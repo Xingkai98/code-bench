@@ -1,0 +1,50 @@
+This repository contains an old tiny C frontend written in C++.
+
+Your task is to fix it and give it a stable command-line contract. You may
+rewrite internals, but keep the project as a CMake-built executable named
+`cparser`.
+
+## Required CLI
+
+The executable must read the entire program/expression from stdin and support
+these modes:
+
+- `cparser --tokens`
+  - Lex stdin and print one token per line as `TYPE:lexeme`.
+  - Required token types: `KEYWORD`, `IDENT`, `INT`, `OP`, `LPAREN`, `RPAREN`,
+    `LBRACE`, `RBRACE`, `SEMI`, `COMMA`.
+  - Supported keywords include at least: `int`, `return`, `if`, `else`, `while`,
+    `for`, `void`.
+  - Supported operators include at least: `+`, `-`, `*`, `/`, `=`, `==`, `<`,
+    `<=`, `>`, `>=`, `!=`.
+- `cparser --parse`
+  - Parse stdin as an integer arithmetic expression.
+  - On success, print exactly `OK` and exit 0.
+  - On failure, print a message beginning with `ERROR:` to stderr and exit nonzero.
+- `cparser --eval`
+  - Parse and evaluate stdin as an integer arithmetic expression.
+  - On success, print the integer result and exit 0.
+  - On failure, print a message beginning with `ERROR:` to stderr and exit nonzero.
+
+## Expression Grammar
+
+Support integer literals, parentheses, `+`, `-`, `*`, `/`, normal precedence,
+and left associativity. Whitespace may be spaces, tabs, or newlines. `//` line
+comments and `/* ... */` block comments must be ignored in every mode.
+
+Examples:
+
+- `2+3*4` evaluates to `14`
+- `(2+3)*4` evaluates to `20`
+- `8-3-2` evaluates to `3`
+- `8/4/2` evaluates to `1`
+
+Malformed input must not hang. It must fail with a nonzero exit code.
+
+## Constraints
+
+- Keep the CMake project buildable with `cmake -S . -B build && cmake --build build`.
+- Keep the executable name `cparser`.
+- Do not require external runtime dependencies.
+- You may add files and tests.
+- Use `python3 test_basic.py` for a visible smoke check.
