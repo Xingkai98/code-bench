@@ -2,257 +2,162 @@
 
 这份文档解释 `prompts/tiny-c-modernize/eval.py` 当前每个评分项具体测什么，以及它和 `prompt.txt` 里的需求如何对应。
 
-当前版本为了避免重新 rollout，只调整评分权重，并去掉原先较弱的 `architecture_api_state` 正则结构检查；也取消 cap 逻辑。也就是说，已有模型输出可以直接用新版 eval 重新打分。
+当前版本只调整 hidden eval 和评分权重，没有修改 prompt。已有 rollout 可以直接用新版 eval 重新打分。
 
-## 当前评分项
-
-```text
-build_and_visible          0.05
-token_contract_basic       0.07
-token_positions            0.11
-expression_fixed           0.10
-expression_randomized      0.22
-comments_whitespace_edge   0.08
-malformed_errors           0.17
-c_like_parse_subset        0.20
-```
-
-当前没有 cap 逻辑。最终分数是各单项分数直接相加。
-
-## 1. build_and_visible，0.05
-
-检查内容：
-
-- `cmake -S . -B .eval_build`
-- `cmake --build .eval_build`
-- 是否生成 `cparser`
-- `python3 test_basic.py`
-
-对应 prompt：
-
-- CMake 项目必须能构建。
-- 构建结果必须包含 `cparser`。
-- visible smoke check 应通过。
-
-这是基础门槛，所以权重较低。
-
-## 2. token_contract_basic，0.07
-
-检查输入：
-
-```c
-int main() { return value!=0, x<=12; }
-```
-
-要求 `--tokens` 的 token type 和 lexeme 序列正确，覆盖：
-
-- keyword
-- identifier
-- parentheses
-- braces
-- multi-char operators `!=` / `<=`
-- integer
-- comma
-- semicolon
-
-对应 prompt：
-
-- `--tokens` 每行输出 token。
-- 支持指定 token 类型。
-- 支持关键字和多字符运算符。
-
-这是基础 lexer 契约，权重低于位置、随机表达式和 C-like parse。
-
-## 3. token_positions，0.11
-
-检查输入：
-
-```c
-int main() {
-	return 12 + 3;
-}
-```
-
-第二行开头是 tab。要求输出精确 `TYPE:lexeme:line:column`，例如：
+## 分数分布
 
 ```text
-KEYWORD:int:1:1
-IDENT:main:1:5
-KEYWORD:return:2:2
-INT:12:2:9
-RBRACE:}:3:1
+build_and_visible             0.05
+token_contract_basic          0.05
+token_positions               0.05
+expression_fixed              0.05
+expression_randomized         0.05
+comments_whitespace_edge      0.05
+
+malformed_errors_easy         0.07
+malformed_errors_medium       0.12
+malformed_errors_hard         0.16
+
+c_like_parse_easy             0.07
+c_like_parse_medium           0.12
+c_like_parse_hard             0.16
 ```
 
-对应 prompt：
+基础 sanity checks 合计 `0.30`。核心 hidden checks 合计 `0.70`。没有 cap 逻辑，最终分数是各单项直接相加。所有 case-group 项都按 case 通过比例计分。
 
-- `--tokens` 输出格式是 `TYPE:lexeme:line:column`。
-- line/column 从 1 开始。
-- tab 按 1 个 column 计。
+## 基础项
 
-这个项容易抓 off-by-one、tab、新行和 token 起始位置错误。
+### build_and_visible，0.05
 
-## 4. expression_fixed，0.10
+检查 `cmake -S . -B .eval_build`、`cmake --build .eval_build`、是否生成 `cparser`，以及 `python3 test_basic.py` 是否通过。
 
-固定表达式检查：
+对应 prompt：CMake 项目必须能构建，产物必须包含 `cparser`，visible smoke check 应通过。
 
-```text
-2+3*4                  -> 14
-(2+3)*4                -> 20
-8-3-2                  -> 3
-8/4/2                  -> 1
--(2+3)*4               -> -20
-+7 + -3 * 2            -> 1
-100 - 4 * (6 + 2) / 4  -> 92
-18/(2+1)+5*2           -> 16
-```
+### token_contract_basic，0.05
 
-每个表达式要求：
+用 `int main() { return value!=0, x<=12; }` 检查 `--tokens` 的 token type 和 lexeme 序列，覆盖 keyword、identifier、括号、花括号、多字符运算符、整数、逗号和分号。
 
-- `--eval` 输出正确整数。
-- `--parse` 输出 `OK`。
+对应 prompt：`--tokens` 输出 token，支持指定 token 类型、关键字和多字符运算符。
 
-对应 prompt：
+### token_positions，0.05
 
-- 支持整数 literal、括号、一元 `+/-`、二元 `+ - * /`。
-- 正常优先级和左结合。
-- 整数除法。
+用带 newline 和 tab 的输入检查 `TYPE:lexeme:line:column` 是否精确，line/column 从 1 开始，tab 按 1 个 column 计。
 
-这是表达式主线的固定样例，权重低于随机表达式。
+对应 prompt：token 必须包含 line/column，且位置规则明确。
 
-## 5. expression_randomized，0.22
+### expression_fixed，0.05
 
-用固定随机种子生成 80 个表达式，并和 Python oracle 对比。
+固定检查 8 个 `--eval` 表达式，覆盖优先级、括号、左结合、一元 `+/-` 和整数除法。
 
-覆盖：
+对应 prompt：eval 模式必须支持整数算术表达式。
 
-- 多层括号
-- 一元正负
-- `+ - * /`
-- 随机空格、tab、换行
-- C++ 风格整数除法向 0 截断
+### expression_randomized，0.05
 
-对应 prompt：
+用固定随机种子生成 80 个表达式，并用 oracle 对比结果。覆盖多层括号、一元符号、四则运算、随机空白、tab/newline 和 C++ 风格整数除法向 0 截断。
 
-- 表达式语法完整性。
-- 空白处理。
-- 优先级和左结合。
-- 整数除法。
+对应 prompt：表达式语法、优先级、左结合、空白处理和整数除法。
 
-这是当前最重要的区分项之一。它用于防止模型只覆盖 visible/fixed case。
+### comments_whitespace_edge，0.05
 
-## 6. comments_whitespace_edge，0.08
+检查 eval 和 tokens 两条路径上的 `\r`、tab、`//` 行注释、`/* ... */` 跨行块注释。
 
-第一部分检查 eval：
+对应 prompt：空白和两类注释必须被正确忽略，未闭合块注释必须报错。
 
-```c
-\r
-12	+	/* line1
-line2 */
-3 // ignored
-* 4
-```
+## malformed_errors_easy，0.07
 
-结果必须是 `24`。
+基础错误处理。case 包括：
 
-第二部分检查 tokens：
+- 空 eval 输入。
+- 非法字符。
+- 未闭合块注释。
+- 表达式缺操作数。
+- 括号不匹配。
+- 相邻整数。
+- 直接除以 0。
+- eval 模式遇到 identifier。
+- return 缺表达式。
+- 声明缺 identifier、initializer 或分号。
 
-```c
-int/*a*/x=1;
-// skip this
-return	/*b*/x;
-```
+每个 case 要求非 0 退出、stderr 以 `ERROR:` 开头、包含 `line:column`，并且不能卡死。
 
-期望 token 序列忽略注释，并正确保留 `int`、`x`、`=`、`1`、`;`、`return`、`x`、`;`。
+对应 prompt：格式错误、非法字符、括号不匹配、缺少分号、未闭合注释、除以 0 都必须失败。
 
-对应 prompt：
+## malformed_errors_medium，0.12
 
-- 空白包括空格、tab、`\r`、`\n`。
-- `//` 行注释和 `/* ... */` 块注释必须被忽略。
-- 块注释可能跨多行。
+中等复杂错误处理。case 包括：
 
-这个项和 token/position 有重叠，所以权重中等偏低。
+- parse/eval 中跨模式错误。
+- 分组或嵌套表达式除以 0。
+- 函数体中的坏 return、坏 initializer、缺分号。
+- 函数/嵌套 block 未闭合。
+- 多余函数右括号。
+- void 函数体中的坏声明或空 return。
+- 双一元符号缺操作数。
 
-## 7. malformed_errors，0.17
+对应 prompt：parser 要消费 token stream，不能只处理 happy path；错误必须稳定返回，不应 hang。
 
-要求以下输入失败：
+## malformed_errors_hard，0.16
 
-```text
-""                         --parse
-"1+"                       --eval
-"*2"                       --parse
-"(1+2"                     --parse
-"1 2"                      --eval
-"1 + @"                    --tokens
-"/* never closed"          --parse
-"10 / (3 - 3)"             --eval
-"int main() { return ; }"  --parse
-```
+高难错误处理。case 包括：
 
-每个失败都要求：
+- `int main( { ... }`、`void f( { }` 这类容易让递归下降 parser 卡死的函数头错误。
+- 嵌套 block 缺外层右花括号。
+- initializer/return 中深层括号错误。
+- 逗号误用。
+- 函数体非法字符。
+- 函数后尾随垃圾 token。
+- 多行输入中的错误位置。
+- CRLF 后的非法字符。
+- 多行未闭合块注释。
+- 注释后隐藏的除以 0。
 
-- 退出码非 0。
-- stderr 以 `ERROR:` 开头。
-- stderr 包含 `line:column`。
-- 不能卡死。
+少数 case 会检查具体 `line:column` 片段，用来区分“只随便报一个位置”和“真正维护 token 位置”的实现。
 
-对应 prompt：
+对应 prompt：失败信息必须包含出错位置，不能卡死。
 
-- 格式错误、非法字符、括号不匹配、缺少分号、未闭合注释、除以 0 都必须失败。
-- 失败时不能卡死。
-- 错误信息包含位置。
+## c_like_parse_easy，0.07
 
-这是高区分度项。很多实现能过 happy path，但会漏错误码、错误格式、错误位置或超时。
+基础 parse-only 能力。valid case 包括：
 
-## 8. c_like_parse_subset，0.20
+- 单个裸表达式，例如 `42`、`x`、`2+3*4`、`(x + 1) * (y - 2)`。
+- 顶层声明、顶层 return。
+- 简单 block。
+- 简单 `int main()` / `void f()` 函数。
 
-要求 `--parse` 接受：
+invalid case 包括声明缺名字、return 缺表达式、initializer 缺表达式、函数缺右括号/右花括号等。
 
-```c
-int main() { return 1 + 2 * 3; }
-void f() { int x; int y = x + 12; { return y; } }
-int x = 12; return x;
-{ int a = 1; a + 2; }
-int main(){ int a=1; int b = a + 2; return b; }
-```
+对应 prompt：`--parse` 除了能解析 C-like 结构，还必须能解析单个表达式。
 
-要求 `--parse` 拒绝：
+## c_like_parse_medium，0.12
 
-```c
-int main( { return 1; }
-int = 1;
-return ;
-int main(){ int x = ; }
-int main(){ return (1+2; }
-int main(){ int x = 1 }
-```
+中等 parse-only 能力。valid case 包括：
 
-对应 prompt：
+- 多行裸表达式。
+- 带注释的裸表达式。
+- identifier 表达式。
+- 嵌套 block。
+- 多声明。
+- 多函数。
+- void 函数内声明和嵌套 return。
+- 表达式语句和复杂 initializer。
 
-- `--parse` 除了表达式，还必须解析 tiny C 子集。
-- 变量声明。
-- 初始化声明。
-- return 语句。
-- 表达式语句。
-- block。
-- 简单函数定义。
+invalid case 包括函数头错误、void 函数头错误、缺 return 分号、未闭合 block、空 return、表达式语句缺右操作数、尾随垃圾和未闭合注释。
 
-这是 modernize 任务区别于普通表达式 parser 的核心项，所以权重较高。
+对应 prompt：tiny C 子集应能处理声明、return、表达式语句、block、简单函数定义，以及注释和空白。
 
-## 为什么去掉 architecture_api_state
+## c_like_parse_hard，0.16
 
-原来的 `architecture_api_state` 主要依赖 regex 检查源码中是否出现 `Token`、`TokenType`、`tokenize` 等标记。这个信号较弱：
+高难 parse-only 能力，专门聚焦复杂“单个裸表达式”输入。case 包括：
 
-- 可以被表面定义骗过。
-- 不能证明 lexer/parser 真能复用。
-- 和行为正确性的关系不够直接。
+- 深层括号算术表达式。
+- 多行 identifier 表达式。
+- 表达式中穿插块注释和行注释。
+- 长左结合链。
+- 重复一元符号。
+- CRLF 表达式。
+- 多行块注释后的表达式。
+- 冗余括号 identifier。
 
-如果不想重新 rollout，最稳妥的做法是去掉它，把分数分配给可观察行为项。
+这个项故意不被大量 statement case 稀释，因为现有强模型样本常见问题是：statement parser 写得不错，但忘了 prompt 明确要求的“`--parse` 也要接受单个表达式”。
 
-长期更好的方案是：下一轮任务把 prompt 和 eval 一起升级为真实 C++ API compile test，但那需要重新 rollout。
-
-## 重打分说明
-
-当前修改只影响 eval 权重和评分项，没有改变 prompt 对模型的输入要求。因此已有 `tiny-c-modernize` workspace 可以直接用新版 eval 重新打分。
-
-如果之后再次修改 prompt，就需要重新 rollout，不能只重打分。
-
+对应 prompt：`--parse` 除了能解析 C-like 结构，还必须能解析单个表达式；表达式支持 identifier、括号、一元 `+/-`、二元 `+ - * /`、优先级、左结合和空白/注释。

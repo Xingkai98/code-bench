@@ -9,6 +9,25 @@ import sys
 from pathlib import Path
 
 
+WEIGHTS = {
+    "build_and_visible": 0.05,
+    "token_contract_basic": 0.05,
+    "token_positions": 0.05,
+    "expression_fixed": 0.05,
+    "expression_randomized": 0.05,
+    "comments_whitespace_edge": 0.05,
+    "malformed_errors_easy": 0.07,
+    "malformed_errors_medium": 0.12,
+    "malformed_errors_hard": 0.16,
+    "c_like_parse_easy": 0.07,
+    "c_like_parse_medium": 0.12,
+    "c_like_parse_hard": 0.16,
+}
+
+if round(sum(WEIGHTS.values()), 10) != 1.0:
+    raise RuntimeError(f"tiny-c-modernize eval weights must sum to 1.0, got {sum(WEIGHTS.values())}")
+
+
 def run_check(results, name, weight, fn):
     try:
         extra = fn()
@@ -25,6 +44,35 @@ def run_check(results, name, weight, fn):
         return 0.0
 
 
+def run_case_group(results, name, weight, cases, fn):
+    passed_cases = 0
+    failed_cases = []
+    for index, case in enumerate(cases, start=1):
+        label = case.get("label", f"case_{index}") if isinstance(case, dict) else f"case_{index}"
+        try:
+            fn(case)
+            passed_cases += 1
+        except Exception as exc:
+            if len(failed_cases) < 12:
+                failed_cases.append({
+                    "case": label,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+    total_cases = len(cases)
+    earned = weight * (passed_cases / total_cases if total_cases else 0.0)
+    results[name] = {
+        "passed": passed_cases == total_cases,
+        "weight": weight,
+        "earned": round(earned, 3),
+        "passed_cases": passed_cases,
+        "total_cases": total_cases,
+    }
+    if failed_cases:
+        results[name]["failed_cases"] = failed_cases
+    return earned
+
+
 def run(cmd, cwd, **kwargs):
     return subprocess.run(
         cmd,
@@ -38,6 +86,7 @@ def run(cmd, cwd, **kwargs):
 
 
 def build_project(workdir):
+    workdir = workdir.resolve()
     build_dir = workdir / ".eval_build"
     if build_dir.exists():
         shutil.rmtree(build_dir)
@@ -74,6 +123,12 @@ def assert_fail(proc, msg):
         raise AssertionError(f"{msg}: stderr must start with ERROR:, got {proc.stderr!r}")
     if not re.search(r"\b\d+:\d+\b", proc.stderr):
         raise AssertionError(f"{msg}: stderr must contain line:column, got {proc.stderr!r}")
+
+
+def assert_fail_at(proc, msg, expected_pos):
+    assert_fail(proc, msg)
+    if expected_pos not in proc.stderr:
+        raise AssertionError(f"{msg}: stderr must contain {expected_pos}, got {proc.stderr!r}")
 
 
 def parse_token_lines(output):
@@ -134,7 +189,7 @@ def gen_expr(rng, depth=0):
 
 
 def main():
-    workdir = Path(sys.argv[1])
+    workdir = Path(sys.argv[1]).resolve()
     results = {}
     score = 0.0
     exe_holder = {}
@@ -215,10 +270,6 @@ def main():
             assert_ok(proc, expr)
             if proc.stdout.strip() != expected:
                 raise AssertionError(f"{expr}: got {proc.stdout!r}, expected {expected!r}")
-            parse_proc = invoke(exe, "--parse", expr)
-            assert_ok(parse_proc, "parse " + expr)
-            if parse_proc.stdout.strip() != "OK":
-                raise AssertionError(f"parse {expr}: expected OK, got {parse_proc.stdout!r}")
 
     def check_expression_randomized():
         exe = get_exe()
@@ -260,63 +311,272 @@ def main():
         if got != expected:
             raise AssertionError(f"comment token mismatch: {got!r}")
 
-    def check_malformed_errors():
+    def check_malformed_errors_easy():
         exe = get_exe()
         bad_cases = [
-            ("", "--parse"),
-            ("1+", "--eval"),
-            ("*2", "--parse"),
-            ("(1+2", "--parse"),
-            ("1 2", "--eval"),
-            ("1 + @", "--tokens"),
-            ("/* never closed", "--parse"),
-            ("10 / (3 - 3)", "--eval"),
-            ("int main() { return ; }", "--parse"),
+            {"mode": "--eval", "input": "", "label": "empty eval"},
+            {"mode": "--tokens", "input": "1 + @", "label": "illegal char"},
+            {"mode": "--tokens", "input": "int x = 1 $ 2;", "label": "illegal dollar"},
+            {"mode": "--tokens", "input": "/* never closed", "label": "unclosed block comment tokens"},
+            {"mode": "--parse", "input": "1+", "label": "trailing plus parse"},
+            {"mode": "--eval", "input": "1+", "label": "trailing plus eval"},
+            {"mode": "--parse", "input": "*2", "label": "leading star"},
+            {"mode": "--eval", "input": "/2", "label": "leading slash"},
+            {"mode": "--parse", "input": "(1+2", "label": "missing right paren"},
+            {"mode": "--parse", "input": "1+2)", "label": "extra right paren"},
+            {"mode": "--eval", "input": "1 2", "label": "adjacent ints"},
+            {"mode": "--eval", "input": "10/0", "label": "division by zero direct"},
+            {"mode": "--eval", "input": "x + 1", "label": "identifier in eval"},
+            {"mode": "--parse", "input": "return ;", "label": "return without expr"},
+            {"mode": "--parse", "input": "int = 1;", "label": "declaration missing ident"},
+            {"mode": "--parse", "input": "int 123abc;", "label": "declaration numeric ident"},
+            {"mode": "--parse", "input": "int x = ;", "label": "declaration missing initializer"},
+            {"mode": "--parse", "input": "int x = 1", "label": "declaration missing semicolon"},
         ]
-        for text, mode in bad_cases:
-            proc = invoke(exe, mode, text, timeout=3)
-            assert_fail(proc, f"{mode} should reject {text!r}")
 
-    def check_c_like_parse_subset():
+        def run_bad_case(case):
+            proc = invoke(exe, case["mode"], case["input"], timeout=1.0)
+            assert_fail(proc, f"{case['mode']} should reject {case['input']!r}")
+
+        return run_case_group(results, "malformed_errors_easy", WEIGHTS["malformed_errors_easy"], bad_cases, run_bad_case)
+
+    def check_malformed_errors_medium():
+        exe = get_exe()
+        bad_cases = [
+            {"mode": "--parse", "input": "/* never closed", "label": "unclosed block comment parse"},
+            {"mode": "--eval", "input": "10 / (3 - 3)", "label": "division by zero grouped"},
+            {"mode": "--eval", "input": "1 / (2 - 2) + 3", "label": "division by zero nested"},
+            {"mode": "--eval", "input": "int x = 1;", "label": "statement in eval"},
+            {"mode": "--parse", "input": "int main() { return ; }", "label": "function return without expr"},
+            {"mode": "--parse", "input": "int main()) { return 1; }", "label": "extra function right paren"},
+            {"mode": "--parse", "input": "int main() {", "label": "unclosed function block"},
+            {"mode": "--parse", "input": "int main() }", "label": "unexpected right brace"},
+            {"mode": "--parse", "input": "{ int a = 1; ", "label": "unclosed nested block"},
+            {"mode": "--parse", "input": "int main(){ int x = ; }", "label": "function bad initializer"},
+            {"mode": "--parse", "input": "int main(){ int x = 1 }", "label": "function missing declaration semicolon"},
+            {"mode": "--parse", "input": "int main(){ return (1+2; }", "label": "return missing expr paren"},
+            {"mode": "--parse", "input": "int main(){ (1+2; }", "label": "expr stmt missing paren"},
+            {"mode": "--parse", "input": "int main(){ 1 + ; }", "label": "expr stmt missing rhs"},
+            {"mode": "--parse", "input": "int main(){ 1 + 2 }", "label": "expr stmt missing semicolon"},
+            {"mode": "--parse", "input": "void f() { int ; }", "label": "void function bad declaration"},
+            {"mode": "--parse", "input": "void f() { return; }", "label": "void function empty return"},
+            {"mode": "--eval", "input": "--", "label": "double unary missing operand"},
+        ]
+
+        def run_bad_case(case):
+            proc = invoke(exe, case["mode"], case["input"], timeout=1.0)
+            assert_fail(proc, f"{case['mode']} should reject {case['input']!r}")
+
+        return run_case_group(results, "malformed_errors_medium", WEIGHTS["malformed_errors_medium"], bad_cases, run_bad_case)
+
+    def check_malformed_errors_hard():
+        exe = get_exe()
+        bad_cases = [
+            {"mode": "--parse", "input": "int main( { return 1; }", "label": "missing function right paren no hang"},
+            {"mode": "--parse", "input": "void f( { }", "label": "void function missing right paren no hang"},
+            {"mode": "--parse", "input": "void f() { { return 1; }", "label": "nested block missing outer brace"},
+            {"mode": "--parse", "input": "int main(){ int a = (1+2; return a; }", "label": "initializer missing paren"},
+            {"mode": "--parse", "input": "int main(){ int a = 1,,2; }", "label": "double comma"},
+            {"mode": "--parse", "input": "int main(){ return 1,,2; }", "label": "comma in return expr"},
+            {"mode": "--parse", "input": "int main(){ return 1 @ 2; }", "label": "illegal char in function", "position": "1:22"},
+            {"mode": "--parse", "input": "int main(){ /* open", "label": "unclosed comment in function"},
+            {"mode": "--parse", "input": "int main(){ return 1; }}", "label": "extra brace after function"},
+            {"mode": "--parse", "input": "int main(){ int a = 1; return a", "label": "missing return semicolon and brace"},
+            {"mode": "--parse", "input": "int main(){ int a = 1; return a; } trailing", "label": "trailing identifier"},
+            {"mode": "--parse", "input": "main int() { return 1; }", "label": "function wrong order"},
+            {"mode": "--parse", "input": "int main() { return 1; } int", "label": "trailing type without decl"},
+            {"mode": "--parse", "input": "int main(){\n  int a = 1;\n  return a + ;\n}", "label": "multiline missing rhs", "position": "3:"},
+            {"mode": "--parse", "input": "int main(){\r\n\tint a = 1;\r\n\treturn a;\r\n} $", "label": "crlf trailing illegal char"},
+            {"mode": "--tokens", "input": "int x;\n/* unterminated\ncomment", "label": "multiline unclosed comment"},
+            {"mode": "--eval", "input": "1 + /* hidden */ (2 / (3 - 3))", "label": "division by zero behind comment"},
+            {"mode": "--parse", "input": "int main(){ int a = 1; { int b = 2; return a + b; }", "label": "missing function brace after nested block"},
+        ]
+
+        def run_bad_case(case):
+            proc = invoke(exe, case["mode"], case["input"], timeout=1.0)
+            if "position" in case:
+                assert_fail_at(proc, f"{case['mode']} should reject {case['input']!r}", case["position"])
+            else:
+                assert_fail(proc, f"{case['mode']} should reject {case['input']!r}")
+
+        return run_case_group(results, "malformed_errors_hard", WEIGHTS["malformed_errors_hard"], bad_cases, run_bad_case)
+
+    def check_c_like_parse_easy():
         exe = get_exe()
         ok_cases = [
-            "int main() { return 1 + 2 * 3; }",
-            "void f() { int x; int y = x + 12; { return y; } }",
-            "int x = 12; return x;",
-            "{ int a = 1; a + 2; }",
-            "int main(){ int a=1; int b = a + 2; return b; }",
+            {"input": "42", "label": "bare int expr"},
+            {"input": "(1)", "label": "bare grouped int expr"},
+            {"input": "x", "label": "bare identifier only expr"},
+            {"input": "+1", "label": "bare unary plus expr"},
+            {"input": "-x", "label": "bare unary identifier expr"},
+            {"input": "2+3*4", "label": "bare precedence expr"},
+            {"input": "-(2+3)*4", "label": "bare unary grouped expr"},
+            {"input": "x + 1", "label": "bare identifier expr"},
+            {"input": "(x + 1) * (y - 2)", "label": "bare multi identifier expr"},
+            {"input": "int x;", "label": "top decl no init"},
+            {"input": "int x = 12;", "label": "top decl init"},
+            {"input": "return 1 + 2 * 3;", "label": "top return"},
+            {"input": "{ int a = 1; a + 2; }", "label": "block decl expr"},
+            {"input": "int main() { return 1 + 2 * 3; }", "label": "int main return"},
+            {"input": "int main(){ int a=1; int b = a + 2; return b; }", "label": "int main decls return"},
+            {"input": "int main(){ 1 + 2; return 3; }", "label": "int main expr stmt"},
+            {"input": "int main(){ return -1 + +2; }", "label": "return unary signs"},
+            {"input": "int main(){ return 8/4/2; }", "label": "return left assoc div"},
+            {"input": "void f() { }", "label": "empty void function"},
+            {"input": "void f() { int x; }", "label": "void decl"},
         ]
-        for src in ok_cases:
-            proc = invoke(exe, "--parse", src)
-            assert_ok(proc, "parse C-like " + src)
-            if proc.stdout.strip() != "OK":
-                raise AssertionError(f"expected OK for {src!r}, got {proc.stdout!r}")
-
         bad_cases = [
-            "int main( { return 1; }",
-            "int = 1;",
-            "return ;",
-            "int main(){ int x = ; }",
-            "int main(){ return (1+2; }",
-            "int main(){ int x = 1 }",
+            {"input": "int = 1;", "label": "declaration missing ident"},
+            {"input": "return ;", "label": "return without expr"},
+            {"input": "int main(){ int x = ; }", "label": "bad initializer"},
+            {"input": "int main(){ return (1+2; }", "label": "return missing paren"},
+            {"input": "int main(){ int x = 1 }", "label": "missing decl semicolon"},
+            {"input": "int main(){", "label": "unclosed function"},
+            {"input": "int main()) { return 1; }", "label": "extra paren"},
+            {"input": "int main(){ return 1; }}", "label": "extra brace"},
+            {"input": "int 123abc;", "label": "numeric identifier"},
+            {"input": "int main(){ int ; }", "label": "missing declaration name"},
         ]
-        for src in bad_cases:
-            proc = invoke(exe, "--parse", src, timeout=3)
-            assert_fail(proc, "reject C-like " + src)
+
+        cases = [{"expected": "ok", **case} for case in ok_cases] + [
+            {"expected": "fail", **case} for case in bad_cases
+        ]
+
+        def run_parse_case(case):
+            proc = invoke(exe, "--parse", case["input"], timeout=1.0)
+            if case["expected"] == "ok":
+                assert_ok(proc, "parse C-like " + case["input"])
+                if proc.stdout.strip() != "OK":
+                    raise AssertionError(f"expected OK for {case['input']!r}, got {proc.stdout!r}")
+            else:
+                assert_fail(proc, "reject C-like " + case["input"])
+
+        return run_case_group(results, "c_like_parse_easy", WEIGHTS["c_like_parse_easy"], cases, run_parse_case)
+
+    def check_c_like_parse_medium():
+        exe = get_exe()
+        ok_cases = [
+            {"input": "x*y+z", "label": "bare identifier precedence expr"},
+            {"input": "(a+b)/(c-d)", "label": "bare grouped identifier division expr"},
+            {"input": "1\n+\n2", "label": "bare multiline expr"},
+            {"input": "/*c*/ 1 + 2 //x", "label": "bare expr with comments"},
+            {"input": "((x))", "label": "bare nested grouped identifier"},
+            {"input": "a_1 + b_2 * 3", "label": "bare underscore identifiers expr"},
+            {"input": "-(x + 1) * +2", "label": "bare mixed unary expr"},
+            {"input": "8/4/2", "label": "bare left associative division"},
+            {"input": "int alpha_1 = 12; return alpha_1;", "label": "top decl return"},
+            {"input": "{ { { return 1; } } }", "label": "triple nested block"},
+            {"input": "int main(){ { int a = 1; return a; } }", "label": "int main nested block"},
+            {"input": "int main(){ int a = (1 + 2) * 3; return a; }", "label": "initializer grouped expr"},
+            {"input": "int main(){ int a; int b; int c = a + b * 2; return c; }", "label": "multiple decls"},
+            {"input": "void f() { int x; int y = x + 12; { return y; } }", "label": "void nested return"},
+            {"input": "void f(){ { int x = 1; } { int y = 2; } }", "label": "sibling blocks"},
+            {"input": "int f() { return (1); } void g() { int x; }", "label": "two functions"},
+            {"input": "int x = 1; int y = x + 2; return y;", "label": "top multiple statements"},
+            {"input": "{ return (1 + 2) * (3 + 4); }", "label": "block complex return"},
+            {"input": "int main(){ int _x1 = -1 + +2 * (3 + 4); _x1 + 5; return _x1; }", "label": "identifier unary initializer and expr stmt"},
+            {"input": "void f(){ { } { int x = 1; x + 2; } }", "label": "empty and nonempty sibling blocks"},
+        ]
+        bad_cases = [
+            {"input": "int main( { return 1; }", "label": "missing function right paren"},
+            {"input": "int main(){ return 1 }", "label": "missing return semicolon"},
+            {"input": "{ int a = 1; ", "label": "unclosed block"},
+            {"input": "void f( { }", "label": "void missing right paren"},
+            {"input": "void f() { return; }", "label": "empty return"},
+            {"input": "int main(){ 1 + ; }", "label": "expr stmt missing rhs"},
+            {"input": "int main(){ (1+2; }", "label": "expr stmt missing paren"},
+            {"input": "int main(){ int a = (1+2; return a; }", "label": "initializer missing paren"},
+            {"input": "int main(){ int a = 1,,2; }", "label": "double comma initializer"},
+            {"input": "main int() { return 1; }", "label": "wrong function order"},
+            {"input": "int main() { return 1; } int", "label": "trailing incomplete decl"},
+            {"input": "int main(){ return 1; } trailing", "label": "trailing identifier"},
+            {"input": "int main(){ /* open", "label": "unclosed comment"},
+        ]
+        cases = [{"expected": "ok", **case} for case in ok_cases] + [
+            {"expected": "fail", **case} for case in bad_cases
+        ]
+
+        def run_parse_case(case):
+            proc = invoke(exe, "--parse", case["input"], timeout=1.0)
+            if case["expected"] == "ok":
+                assert_ok(proc, "parse C-like " + case["input"])
+                if proc.stdout.strip() != "OK":
+                    raise AssertionError(f"expected OK for {case['input']!r}, got {proc.stdout!r}")
+            else:
+                assert_fail(proc, "reject C-like " + case["input"])
+
+        return run_case_group(results, "c_like_parse_medium", WEIGHTS["c_like_parse_medium"], cases, run_parse_case)
+
+    def check_c_like_parse_hard():
+        exe = get_exe()
+        ok_cases = [
+            {"input": "(((1 + 2) * (3 + 4)) - 5) / 2", "label": "bare deep arithmetic expr"},
+            {"input": "\n\talpha_1 +\n\tbeta_2 * (gamma_3 - 4)", "label": "bare multiline identifier expr"},
+            {"input": "/* before */ -(a + b) /* mid */ * (c + +2)", "label": "bare commented unary expr"},
+            {"input": "a + b + c + d + e", "label": "bare left associative addition chain"},
+            {"input": "a * b / c * d / e", "label": "bare multiplicative chain"},
+            {"input": "-(-(-1))", "label": "bare repeated unary int"},
+            {"input": "-(+identifier_123)", "label": "bare repeated unary identifier"},
+            {"input": "(a + (b * (c + (d))))", "label": "bare nested identifier groups"},
+            {"input": "1\r\n+\r\n2\r\n*\r\n3", "label": "bare crlf expression"},
+            {"input": "/*line1\nline2*/ x + 1", "label": "bare multiline comment expr"},
+            {"input": "((a_0)) + ((b_1))", "label": "bare redundant parens identifiers"},
+            {"input": "1 + 2 * 3 - 4 / 2", "label": "bare mixed precedence expr"},
+            {"input": "x /* comment */", "label": "bare identifier trailing comment"},
+            {"input": "(x + y)\n*\n(z - w)", "label": "bare multiline grouped identifiers"},
+            {"input": "0", "label": "bare zero expr"},
+            {"input": "+(+1)", "label": "bare nested unary plus"},
+            {"input": "a + /* left */ b * /* right */ c", "label": "bare expression with infix comments"},
+            {"input": "(((alpha))) + -((beta))", "label": "bare redundant groups with unary identifier"},
+            {"input": "1 + 2 + 3 + 4 + 5 + 6", "label": "bare long additive chain"},
+            {"input": "1 * 2 * 3 / 4 / 5", "label": "bare long multiplicative chain"},
+            {"input": "((a + b) * (c + d)) / (e - f)", "label": "bare nested identifier arithmetic"},
+            {"input": "\t\t-1 +\t+2", "label": "bare tabbed unary expression"},
+            {"input": "/* only leading comment */\n((1))", "label": "bare expression after leading comment line"},
+            {"input": "x + y // trailing comment", "label": "bare expression with line comment"},
+        ]
+        cases = [{"expected": "ok", **case} for case in ok_cases]
+
+        def run_parse_case(case):
+            proc = invoke(exe, "--parse", case["input"], timeout=1.0)
+            if case["expected"] == "ok":
+                assert_ok(proc, "parse C-like " + case["input"])
+                if proc.stdout.strip() != "OK":
+                    raise AssertionError(f"expected OK for {case['input']!r}, got {proc.stdout!r}")
+            else:
+                assert_fail(proc, "reject C-like " + case["input"])
+
+        return run_case_group(results, "c_like_parse_hard", WEIGHTS["c_like_parse_hard"], cases, run_parse_case)
 
     checks = [
-        ("build_and_visible", 0.05, check_build_and_visible),
-        ("token_contract_basic", 0.07, check_token_contract_basic),
-        ("token_positions", 0.11, check_token_positions),
-        ("expression_fixed", 0.10, check_expression_fixed),
-        ("expression_randomized", 0.22, check_expression_randomized),
-        ("comments_whitespace_edge", 0.08, check_comments_whitespace_edge),
-        ("malformed_errors", 0.17, check_malformed_errors),
-        ("c_like_parse_subset", 0.20, check_c_like_parse_subset),
+        ("build_and_visible", check_build_and_visible),
+        ("token_contract_basic", check_token_contract_basic),
+        ("token_positions", check_token_positions),
+        ("expression_fixed", check_expression_fixed),
+        ("expression_randomized", check_expression_randomized),
+        ("comments_whitespace_edge", check_comments_whitespace_edge),
     ]
 
-    for name, weight, fn in checks:
-        score += run_check(results, name, weight, fn)
+    for name, fn in checks:
+        score += run_check(results, name, WEIGHTS[name], fn)
+
+    for name, fn in [
+        ("malformed_errors_easy", check_malformed_errors_easy),
+        ("malformed_errors_medium", check_malformed_errors_medium),
+        ("malformed_errors_hard", check_malformed_errors_hard),
+        ("c_like_parse_easy", check_c_like_parse_easy),
+        ("c_like_parse_medium", check_c_like_parse_medium),
+        ("c_like_parse_hard", check_c_like_parse_hard),
+    ]:
+        try:
+            score += fn()
+        except Exception as exc:
+            results[name] = {
+                "passed": False,
+                "weight": WEIGHTS[name],
+                "earned": 0.0,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     passed = [name for name, item in results.items() if item["passed"]]
     failed = [name for name, item in results.items() if not item["passed"]]
