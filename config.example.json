@@ -1,6 +1,6 @@
 {
     "runs": 3,
-    "timeout_seconds": 600,
+    "timeout_seconds": 1200,
     "retry_count": 1,
     "models": [
         {
@@ -9,8 +9,7 @@
                 "ANTHROPIC_API_KEY": "sk-ant-xxx",
                 "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
             },
-            "model": "claude-opus-4-8-20250514",
-            "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            "model": "claude-opus-4-8-20250514"
         },
         {
             "name": "sonnet-openrouter",
@@ -18,8 +17,7 @@
                 "ANTHROPIC_API_KEY": "sk-or-xxx",
                 "ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1/anthropic"
             },
-            "model": "anthropic/claude-sonnet-5",
-            "thinking": { "type": "enabled", "budget_tokens": 16000 }
+            "model": "anthropic/claude-sonnet-5"
         }
     ],
     "sandbox": {
